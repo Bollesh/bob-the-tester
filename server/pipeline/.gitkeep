@@ -1,0 +1,2 @@
+# P2 owns — pipeline tools (smells, flaky, properties, fuzz, mutation)
+# One file per stage. No cross-imports between stage files.

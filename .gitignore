@@ -1,0 +1,49 @@
+# ── Runtime / transient artifacts (never commit) ─────────────────────────────
+testforge.db
+*.db-shm
+*.db-wal
+
+# Coverage
+coverage.xml
+.coverage
+.coverage.*
+htmlcov/
+
+# pytest / JUnit
+junit_*.xml
+cov_*.xml
+smoke_cov_*.xml
+.pytest_cache/
+
+# mutmut
+.mutmut-cache
+html/
+
+# Atheris fuzz corpora
+fuzz_corpus/
+crash-*/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Env
+.env
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# ── Curated exceptions (DO commit these) ─────────────────────────────────────
+# demo_replay/   ← committed before demo freeze (P4)
+# bob_sessions/  ← append-only; commit after every meaningful session (P3)
+!demo_replay/
+!bob_sessions/

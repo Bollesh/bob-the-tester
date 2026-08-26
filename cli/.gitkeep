@@ -1,0 +1,3 @@
+# P5 owns — EMPTY until demo freeze.
+# CLI wrapper (shells out to `bob -p "..." --yolo`, reads from testforge.db).
+# GitHub Action = this CLI in a workflow file.
