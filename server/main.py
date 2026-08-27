@@ -36,13 +36,12 @@ from server.core.coverage import get_coverage, list_uncovered
 from server.core.run_tests import run_tests
 from server.core.validate import validate_and_keep
 
-# ── P2 pipeline imports (added here when P2 branch merges) ──────────────────
-# Pattern:
-#   from server.pipeline.smells import detect_smells
-#   from server.pipeline.flaky import run_flaky_check
-#   from server.pipeline.properties import run_property_tests
-#   from server.pipeline.fuzz import run_fuzz
-#   from server.pipeline.mutation import mutation_test
+# ── P2 pipeline imports ─────────────────────────────────────────────────────
+from server.pipeline.flaky import run_flaky_check
+from server.pipeline.fuzz import run_fuzz
+from server.pipeline.mutation import mutation_test
+from server.pipeline.properties import run_property_tests
+from server.pipeline.smells import detect_smells
 
 # ── P4 data imports (added here when P4 branch merges) ──────────────────────
 # Pattern:
@@ -255,23 +254,219 @@ async def list_tools() -> list[Tool]:
         ),
 
         # ════════════════════════════════════════════════════════════════
-        # P2 — PIPELINE TOOLS
+        # P2 — PIPELINE TOOLS  (declared in pipeline order: smells first,
+        #                       mutation last — AGENTS.md §4)
         # ════════════════════════════════════════════════════════════════
-        # Add one Tool(...) block per stage, in pipeline order (smells first,
-        # mutation last).  Copy the P1 Tool(...) blocks above as a template.
-        # Required inputSchema fields for every P2 tool:
-        #   test_file  str  — absolute path to the test file
-        #   run_id     str  — optional shared UUID
-        # Gate policy (AGENTS.md §3):
-        #   detect_smells, run_property_tests, run_fuzz, mutation_test
-        #       → always proceed=True (lower score, add warnings in verdict)
-        #   run_flaky_check
-        #       → proceed=False ONLY for the flaky tests; warn for borderline
-        # Tool(name="detect_smells", ...),
-        # Tool(name="run_flaky_check", ...),
-        # Tool(name="run_property_tests", ...),
-        # Tool(name="run_fuzz", ...),
-        # Tool(name="mutation_test", ...),
+
+        Tool(
+            name="detect_smells",
+            description=(
+                "Static smell checks on a test file.  Returns RAW FINDINGS ONLY — "
+                "critiquing them is your job, not the tool's.\n\n"
+                "proceed is always true: a smelly test can still be a correct, "
+                "coverage-adding test, so smells never halt the pipeline.\n\n"
+                "Smell types reported:\n"
+                "  no_assertion       — the test asserts nothing at all\n"
+                "  empty_test         — body is only pass/.../docstring\n"
+                "  trivial_assertion  — assert True, `x is not None`, bare assertTrue\n"
+                "  duplicate_body     — structurally identical to an earlier test\n"
+                "  sleep_call         — time.sleep(), a flakiness source\n\n"
+                "Decision fields in details:\n"
+                "  findings      — [{test_name, smell_type, line, snippet}]\n"
+                "  tests_scanned — how many test functions were analysed\n"
+                "  smell_score   — 1.0 clean … 0.0 every test smelly\n"
+                "  by_type       — {smell_type: count}\n\n"
+                "After reading findings, rewrite weak assertions into behavioural "
+                "ones and re-validate each rewrite with validate_and_keep."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "test_file": {
+                        "type": "string",
+                        "description": "Absolute path to the Python test file to analyse.",
+                    },
+                    "run_id": {"type": "string"},
+                },
+                "required": ["test_file"],
+            },
+        ),
+
+        Tool(
+            name="run_flaky_check",
+            description=(
+                "Run a test file N times and report any test whose outcome is not "
+                "identical every time.\n\n"
+                "proceed=false when ANY test is flaky — this IS a hard gate.  A test "
+                "that cannot make up its mind is worthless as a regression signal; "
+                "discard the tests listed in details.flaky before continuing.\n\n"
+                "Decision fields in details:\n"
+                "  flaky                — [{test_id, outcomes, distinct}] discard these\n"
+                "  outcomes             — {test_id: [outcome per run]} full vectors\n"
+                "  stable               — test ids that never varied\n"
+                "  consistently_failing — failed in EVERY run: deterministically\n"
+                "                         broken, NOT flaky.  Do not confuse the two;\n"
+                "                         these may indicate a real bug in the code\n"
+                "                         under test rather than a bad test.\n"
+                "  runs_completed       — runs that produced a parsable report"
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "test_file": {
+                        "type": "string",
+                        "description": "Absolute path to the test file to repeat.",
+                    },
+                    "n": {
+                        "type": "integer",
+                        "description": "Repetitions, clamped to 2–20.  Default 5.",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": (
+                            "Project root for pytest.  Defaults to two directories "
+                            "up from test_file."
+                        ),
+                    },
+                    "run_id": {"type": "string"},
+                },
+                "required": ["test_file"],
+            },
+        ),
+
+        Tool(
+            name="run_property_tests",
+            description=(
+                "Execute Hypothesis property tests and return SHRUNK counterexamples.\n\n"
+                "You write the properties; this tool only runs them.  proceed is "
+                "always true — a counterexample is a FINDING, not a failure: it means "
+                "the engine did its job.  Convert each one into a named, docstring'd "
+                "regression test and re-validate it with validate_and_keep.\n\n"
+                "Decision fields in details:\n"
+                "  failures        — [{property, shrunk_input, exception, traceback_tail}]\n"
+                "  shrunk_input    — the MINIMAL failing call, e.g. 'test_f(\\n  x=100,\\n)'\n"
+                "                    Use these exact values in the regression test.\n"
+                "  passed / failed — property counts\n"
+                "  engine_available— false when Hypothesis is not installed\n\n"
+                "If engine_available is false the stage was skipped, not failed; "
+                "continue the pipeline."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "description": (
+                            "Absolute path to the file containing @given properties, "
+                            "or a pytest node id like 'tests/test_props.py::test_roundtrip'."
+                        ),
+                    },
+                    "max_examples": {
+                        "type": "integer",
+                        "description": "Examples generated per property.  Default 100.",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Project root for pytest.  Defaults to two levels up from target.",
+                    },
+                    "run_id": {"type": "string"},
+                },
+                "required": ["target"],
+            },
+        ),
+
+        Tool(
+            name="run_fuzz",
+            description=(
+                "Run an Atheris fuzz harness under a time budget and report crashes.\n\n"
+                "You write the harness (it must call atheris.Setup(sys.argv, "
+                "TestOneInput) then atheris.Fuzz()); this tool only executes it.  "
+                "proceed is always true — a crash is a FINDING.  Turn each crashing "
+                "input into a named regression test.\n\n"
+                "Decision fields in details:\n"
+                "  crashes          — [{input_repr, input_file, exception, stack_top}]\n"
+                "  input_repr       — repr() of the crashing bytes; reuse verbatim\n"
+                "  execs_per_sec    — throughput libFuzzer reported\n"
+                "  engine_available — false when Atheris is not installed\n\n"
+                "Atheris needs a clang/libFuzzer toolchain and is the project's "
+                "pre-agreed first cut.  If engine_available is false, skip this stage "
+                "and rely on run_property_tests for machine-found inputs — do NOT "
+                "treat it as a pipeline failure."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "harness_path": {
+                        "type": "string",
+                        "description": "Absolute path to the Atheris harness you wrote.",
+                    },
+                    "seconds": {
+                        "type": "integer",
+                        "description": "Wall-clock fuzzing budget, clamped to 1–3600.  Default 60.",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Working directory.  Defaults to the harness's own directory.",
+                    },
+                    "run_id": {"type": "string"},
+                },
+                "required": ["harness_path"],
+            },
+        ),
+
+        Tool(
+            name="mutation_test",
+            description=(
+                "Mutation-test ONE module: mutate its code and report which mutants "
+                "the suite failed to kill.  This is the project's test-strength "
+                "metric — coverage says the tests RAN the code, the mutation score "
+                "says they would NOTICE if it were wrong.\n\n"
+                "proceed is always true.  Surviving mutants are regeneration work: "
+                "write tests that specifically kill them, then re-run this tool and "
+                "confirm the score rose.\n\n"
+                "Decision fields in details:\n"
+                "  mutation_score — killed / (killed + survived)\n"
+                "  survived       — [{id, line, original, mutated, status, function}]\n"
+                "  status per survivor tells you WHICH FIX to apply:\n"
+                "    'survived'  — a test ran that line and missed the change.\n"
+                "                  The assertion is too weak: strengthen it.\n"
+                "    'no tests'  — no test executed the line at all.\n"
+                "                  Write a new test; a better assertion won't help.\n"
+                "  line / original / mutated — exactly what changed, so you can\n"
+                "                  write an assertion that distinguishes them\n"
+                "  not_covered    — how many survivors were never executed\n\n"
+                "Expensive: always scope to one module and run it last."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "target_module": {
+                        "type": "string",
+                        "description": (
+                            "Module to mutate — absolute, or relative to cwd "
+                            "(e.g. 'src/pricing.py')."
+                        ),
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": (
+                            "Project root.  Required when target_module is relative; "
+                            "otherwise defaults to two directories up from it."
+                        ),
+                    },
+                    "tests_dir": {
+                        "type": "string",
+                        "description": "Test selection passed to pytest, relative to cwd.  Default 'tests'.",
+                    },
+                    "timeout_s": {
+                        "type": "integer",
+                        "description": "Ceiling for the whole mutmut run in seconds.  Default 900.",
+                    },
+                    "run_id": {"type": "string"},
+                },
+                "required": ["target_module"],
+            },
+        ),
 
         # ════════════════════════════════════════════════════════════════
         # P4 — DATA / EXPLAIN TOOLS
@@ -324,17 +519,44 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             )
 
         # ── P2 pipeline tools ─────────────────────────────────────────────
-        # Pattern (one elif per tool):
-        #   elif name == "detect_smells":
-        #       result = detect_smells(
-        #           test_file=arguments["test_file"],
-        #           run_id=arguments.get("run_id"),
-        #       )
-        # elif name == "detect_smells":   ...
-        # elif name == "run_flaky_check": ...
-        # elif name == "run_property_tests": ...
-        # elif name == "run_fuzz":        ...
-        # elif name == "mutation_test":   ...
+        elif name == "detect_smells":
+            result = detect_smells(
+                test_file=arguments["test_file"],
+                run_id=arguments.get("run_id"),
+            )
+
+        elif name == "run_flaky_check":
+            result = run_flaky_check(
+                test_file=arguments["test_file"],
+                n=arguments.get("n", 5),
+                cwd=arguments.get("cwd", ""),
+                run_id=arguments.get("run_id"),
+            )
+
+        elif name == "run_property_tests":
+            result = run_property_tests(
+                target=arguments["target"],
+                max_examples=arguments.get("max_examples", 100),
+                cwd=arguments.get("cwd", ""),
+                run_id=arguments.get("run_id"),
+            )
+
+        elif name == "run_fuzz":
+            result = run_fuzz(
+                harness_path=arguments["harness_path"],
+                seconds=arguments.get("seconds", 60),
+                cwd=arguments.get("cwd", ""),
+                run_id=arguments.get("run_id"),
+            )
+
+        elif name == "mutation_test":
+            result = mutation_test(
+                target_module=arguments["target_module"],
+                cwd=arguments.get("cwd", ""),
+                tests_dir=arguments.get("tests_dir", "tests"),
+                timeout_s=arguments.get("timeout_s", 900),
+                run_id=arguments.get("run_id"),
+            )
 
         # ── P4 data tools ─────────────────────────────────────────────────
         # Pattern:
