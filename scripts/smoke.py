@@ -26,6 +26,23 @@ What it tests:
     6. validate_and_keep (NO COVERAGE GAIN candidate)
                       → kept=False, rollback_performed=True, test file restored
     7. Idempotency    — test file content identical to original after discards
+
+    P2 pipeline stages:
+    8.  detect_smells      — clean file is clean; smelly fixture trips every
+                             detector; a good test is not falsely flagged
+    9.  run_flaky_check    — stable suite passes; an alternating test is caught
+                             and gates (proceed=False); a deterministic failure
+                             is reported separately, NOT as flakiness
+    10. run_property_tests — true property holds, false one is falsified and
+                             shrunk to the minimal counterexample
+    11. run_fuzz           — seeded crash is found by the harness
+    12. mutation_test      — mutants generated, survivors carry resolved file
+                             lines and original→mutated source
+
+Stages 10–12 depend on optional engines (Hypothesis, Atheris, mutmut).  When
+an engine is absent the check asserts CLEAN DEGRADATION instead — proceed
+stays true and engine_available reports false — so a machine without the
+[pipeline] extra still gets a green run.
 """
 from __future__ import annotations
 
@@ -57,6 +74,11 @@ sys.path.insert(0, str(REPO_ROOT))
 from server.core.coverage import get_coverage, list_uncovered
 from server.core.run_tests import run_tests
 from server.core.validate import validate_and_keep
+from server.pipeline.flaky import run_flaky_check
+from server.pipeline.fuzz import run_fuzz
+from server.pipeline.mutation import mutation_test
+from server.pipeline.properties import run_property_tests
+from server.pipeline.smells import detect_smells
 from server.schema import ToolResult
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -76,6 +98,17 @@ def check(label: str, condition: bool, detail: str = "") -> None:
     else:
         print(f"  {FAIL} {label}" + (f" - {detail}" if detail else ""))
         failures.append(label)
+
+
+def warn(label: str, detail: str = "") -> None:
+    """
+    Report a check that could not run rather than one that failed.
+
+    Used for optional pipeline engines (Hypothesis, Atheris, mutmut): a
+    machine without the [pipeline] extra installed must still get a green
+    smoke run, because those stages degrade by design rather than break.
+    """
+    print(f"  {WARN} {label}" + (f" - {detail}" if detail else ""))
 
 
 def section(title: str) -> None:
@@ -334,13 +367,314 @@ check("test file identical to original after all discard operations",
       current == original_content,
       f"file length: original={len(original_content)} current={len(current)}")
 
+# ═════════════════════════════════════════════════════════════════════════════
+# P2 — QUALITY PIPELINE TOOLS
+#
+# Fixtures for these checks are written to a temp directory, never into
+# sample_repo/tests/ — that directory is Bob-only (AGENTS.md invariant 5).
+# ═════════════════════════════════════════════════════════════════════════════
+
+P2_TMP = Path(tempfile.mkdtemp(prefix="smoke_p2_"))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check 8: detect_smells
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("8 · detect_smells — static smell checks")
+
+# 8a — the pristine placeholder suite should come back clean
+result = detect_smells(test_file=str(SAMPLE_TEST_FILE))
+check("ok=True", result.ok, result.verdict)
+check("proceed=True (smells never gate)", result.proceed)
+check("clean file reports no findings",
+      result.details.get("findings") == [],
+      f"got {result.details.get('findings')}")
+check("tests_scanned == 3", result.details.get("tests_scanned") == 3,
+      f"got {result.details.get('tests_scanned')}")
+check("clean file scores 1.0", result.details.get("smell_score") == 1.0,
+      f"got {result.details.get('smell_score')}")
+
+# 8b — a deliberately smelly fixture must trip every detector
+smelly = P2_TMP / "test_smelly_fixture.py"
+smelly.write_text(textwrap.dedent('''\
+    import time
+
+
+    def test_no_assertion():
+        value = 1 + 1
+        print(value)
+
+
+    def test_empty():
+        pass
+
+
+    def test_trivial_not_none():
+        value = 1 + 1
+        assert value is not None
+
+
+    def test_sleepy():
+        time.sleep(0.01)
+        assert 1 + 1 == 2
+
+
+    def test_original():
+        assert 2 + 2 == 4
+
+
+    def test_duplicate():
+        assert 2 + 2 == 4
+
+
+    def test_good():
+        """A genuinely fine test — must NOT be flagged."""
+        assert 2 + 2 == 4, "explicit message"
+'''), encoding="utf-8")
+
+result = detect_smells(test_file=str(smelly))
+found_types = set(result.details.get("by_type", {}))
+check("ok=True on smelly fixture", result.ok, result.verdict)
+check("proceed=True even with smells", result.proceed)
+for expected in ("no_assertion", "empty_test", "trivial_assertion",
+                 "sleep_call", "duplicate_body"):
+    check(f"detects {expected}", expected in found_types,
+          f"by_type={sorted(found_types)}")
+check("smell_score < 1.0 when smells exist",
+      result.details.get("smell_score", 1.0) < 1.0,
+      f"got {result.details.get('smell_score')}")
+flagged = {f["test_name"] for f in result.details.get("findings", [])}
+check("clean test NOT flagged (no false positive)",
+      "test_good" not in flagged,
+      f"flagged: {sorted(flagged)}")
+print(f"     {result.verdict}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check 9: run_flaky_check
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("9 · run_flaky_check — repeat-run stability")
+
+# 9a — stable suite
+result = run_flaky_check(test_file=str(SAMPLE_TEST_FILE), n=2, cwd=str(SAMPLE_ROOT))
+check("ok=True", result.ok, result.verdict)
+check("proceed=True (nothing flaky)", result.proceed, result.verdict)
+check("flaky list empty", result.details.get("flaky") == [],
+      f"got {result.details.get('flaky')}")
+check("outcome vector per test present",
+      len(result.details.get("outcomes", {})) == 3,
+      f"got {len(result.details.get('outcomes', {}))} tests")
+check("runs_completed == 2", result.details.get("runs_completed") == 2,
+      f"got {result.details.get('runs_completed')}")
+
+# 9b — a genuinely flaky test must be caught AND gate the pipeline
+flaky_proj = P2_TMP / "flakyproj"
+(flaky_proj / "tests").mkdir(parents=True, exist_ok=True)
+flaky_file = flaky_proj / "tests" / "test_flaky_fixture.py"
+flaky_file.write_text(textwrap.dedent('''\
+    import itertools
+    import os
+
+    STATE = os.path.join(os.path.dirname(__file__), "_counter.txt")
+
+
+    def _next_run() -> int:
+        n = 0
+        if os.path.exists(STATE):
+            n = int(open(STATE).read() or "0")
+        with open(STATE, "w") as fh:
+            fh.write(str(n + 1))
+        return n
+
+
+    def test_stable_passes():
+        assert 1 + 1 == 2
+
+
+    def test_alternates():
+        """Passes on even runs, fails on odd ones — deterministic flakiness."""
+        assert _next_run() % 2 == 0
+
+
+    def test_always_fails():
+        assert 1 == 2, "deterministic failure, must NOT be called flaky"
+'''), encoding="utf-8")
+
+result = run_flaky_check(test_file=str(flaky_file), n=4, cwd=str(flaky_proj))
+flaky_names = {f["test_id"].rpartition("::")[2] for f in result.details.get("flaky", [])}
+failing_names = {t.rpartition("::")[2]
+                 for t in result.details.get("consistently_failing", [])}
+check("ok=True on flaky fixture", result.ok, result.verdict)
+check("proceed=False (flakiness IS a hard gate)", not result.proceed, result.verdict)
+check("alternating test reported flaky",
+      "test_alternates" in flaky_names, f"flaky={sorted(flaky_names)}")
+check("stable test NOT reported flaky",
+      "test_stable_passes" not in flaky_names, f"flaky={sorted(flaky_names)}")
+check("deterministic failure NOT reported flaky",
+      "test_always_fails" not in flaky_names, f"flaky={sorted(flaky_names)}")
+check("deterministic failure listed as consistently_failing",
+      "test_always_fails" in failing_names, f"got {sorted(failing_names)}")
+print(f"     {result.verdict}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check 10: run_property_tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("10 · run_property_tests — Hypothesis counterexamples")
+
+prop_proj = P2_TMP / "propproj"
+(prop_proj / "tests").mkdir(parents=True, exist_ok=True)
+prop_file = prop_proj / "tests" / "test_props_fixture.py"
+prop_file.write_text(textwrap.dedent('''\
+    from hypothesis import given, strategies as st
+
+
+    @given(st.integers())
+    def test_identity_holds(x):
+        """True property — must pass."""
+        assert x + 0 == x
+
+
+    @given(st.integers())
+    def test_bounded_is_false(x):
+        """False property — shrinks to exactly x=100."""
+        assert x < 100
+'''), encoding="utf-8")
+
+result = run_property_tests(target=str(prop_file), max_examples=50, cwd=str(prop_proj))
+
+if not result.details.get("engine_available", False):
+    warn("Hypothesis not installed — stage skipped",
+         'install with: pip install -e ".[pipeline]"')
+    check("degrades cleanly: proceed=True despite missing engine", result.proceed,
+          result.verdict)
+    check("degrades cleanly: engine_available=False reported",
+          result.details.get("engine_available") is False)
+else:
+    check("ok=True", result.ok, result.verdict)
+    check("proceed=True (counterexamples are findings, not failures)",
+          result.proceed, result.verdict)
+    check("true property passed", result.details.get("passed") == 1,
+          f"got {result.details.get('passed')}")
+    check("false property falsified", result.details.get("failed") == 1,
+          f"got {result.details.get('failed')}")
+    failures_found = result.details.get("failures", [])
+    check("failure carries a shrunk_input",
+          bool(failures_found) and bool(failures_found[0].get("shrunk_input")),
+          f"got {failures_found[:1]}")
+    check("counterexample shrank to the minimal value (x=100)",
+          bool(failures_found) and "100" in (failures_found[0].get("shrunk_input") or ""),
+          f"got {failures_found[0].get('shrunk_input') if failures_found else None!r}")
+    check("max_examples echoed back", result.details.get("max_examples") == 50,
+          f"got {result.details.get('max_examples')}")
+    print(f"     {result.verdict}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check 11: run_fuzz
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("11 · run_fuzz — Atheris harness execution")
+
+harness = P2_TMP / "fuzz_harness.py"
+harness.write_text(textwrap.dedent('''\
+    import sys
+    import atheris
+
+    with atheris.instrument_imports():
+        pass
+
+
+    def TestOneInput(data):
+        if len(data) > 3 and data[:4] == b"BOOM":
+            raise ValueError("seeded crash for smoke test")
+
+
+    atheris.Setup(sys.argv, TestOneInput)
+    atheris.Fuzz()
+'''), encoding="utf-8")
+
+result = run_fuzz(harness_path=str(harness), seconds=5, cwd=str(P2_TMP))
+
+if not result.details.get("engine_available", False):
+    warn("Atheris not installed — stage skipped (pre-agreed first cut, plan §3)",
+         "Hypothesis still supplies machine-found counterexamples")
+    check("degrades cleanly: proceed=True despite missing engine", result.proceed,
+          result.verdict)
+    check("degrades cleanly: engine_available=False reported",
+          result.details.get("engine_available") is False)
+    check("degrades cleanly: crashes list present and empty",
+          result.details.get("crashes") == [])
+else:
+    check("ok=True", result.ok, result.verdict)
+    check("proceed=True (crashes are findings)", result.proceed, result.verdict)
+    check("crashes list present", isinstance(result.details.get("crashes"), list))
+    check("seeded crash was found", len(result.details.get("crashes", [])) > 0,
+          "harness raises on b'BOOM' — fuzzer should reach it")
+    print(f"     {result.verdict}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check 12: mutation_test
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("12 · mutation_test — test strength on sample_repo/src/calculator.py")
+
+result = mutation_test(
+    target_module="src/calculator.py",
+    cwd=str(SAMPLE_ROOT),
+    tests_dir="tests",
+    timeout_s=600,
+)
+
+if not result.details.get("engine_available", False):
+    warn("mutmut not installed — stage skipped",
+         'install with: pip install -e ".[pipeline]"')
+    check("degrades cleanly: proceed=True despite missing engine", result.proceed,
+          result.verdict)
+    check("degrades cleanly: engine_available=False reported",
+          result.details.get("engine_available") is False)
+else:
+    check("ok=True", result.ok, result.verdict)
+    check("proceed=True (survivors are regeneration work)", result.proceed,
+          result.verdict)
+    check("mutants were generated", result.details.get("total", 0) > 0,
+          f"got total={result.details.get('total')}")
+    score_val = result.details.get("mutation_score", -1)
+    check("mutation_score in [0.0, 1.0]", 0.0 <= score_val <= 1.0,
+          f"got {score_val}")
+    check("baseline suite leaves survivors (it only covers add/subtract)",
+          result.details.get("survived_count", 0) > 0,
+          f"got survived_count={result.details.get('survived_count')}")
+    survivors = result.details.get("survived", [])
+    if survivors:
+        first = survivors[0]
+        check("survivor has an id", bool(first.get("id")))
+        check("survivor has a resolved file line", isinstance(first.get("line"), int),
+              f"got {first.get('line')!r}")
+        check("survivor has original + mutated source",
+              bool(first.get("original")) and bool(first.get("mutated")),
+              f"got {first.get('original')!r} -> {first.get('mutated')!r}")
+        check("survivor status explains which fix to apply",
+              first.get("status") in ("survived", "no tests"),
+              f"got {first.get('status')!r}")
+        # Line numbers must point into the real source file, not the diff hunk
+        calc_lines = SAMPLE_SRC.read_text(encoding="utf-8").splitlines()
+        check("resolved line is within the source file",
+              isinstance(first.get("line"), int)
+              and 1 <= first["line"] <= len(calc_lines),
+              f"line={first.get('line')} file has {len(calc_lines)} lines")
+    print(f"     {result.verdict}")
+    print(f"     took {result.duration_ms / 1000:.1f}s")
+
+# ── Clean up P2 fixtures ─────────────────────────────────────────────────────
+shutil.rmtree(P2_TMP, ignore_errors=True)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary
 # ─────────────────────────────────────────────────────────────────────────────
 
 section("SUMMARY")
 if not failures:
-    print(f"\n  {PASS} All P1 smoke checks passed.")
+    print(f"\n  {PASS} All P1 + P2 smoke checks passed.")
     print(f"  Server is ready. Register in .bob/mcp.json and run Bob's skill.\n")
     sys.exit(0)
 else:
