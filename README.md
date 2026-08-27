@@ -1,10 +1,10 @@
-# TestForge
+# Bob the Tester
 
-**AI writes your tests; TestForge proves they'd catch real bugs.**
+**AI writes your tests; Bob the Tester proves they'd catch real bugs.**
 
-TestForge is an AI-powered test generation and QA framework built for the IBM SkillsBuild Hackathon. It pairs an autonomous test-writing agent (Bob) with an MCP server that refuses to accept a test on faith: every generated test must survive a staged quality pipeline — execution, coverage gain, smell detection, flakiness, property-based counterexamples, fuzzing, and mutation testing — before it is kept.
+Bob the Tester is an AI-powered test generation and QA framework built for the IBM SkillsBuild Hackathon. It pairs an autonomous test-writing agent (Bob) with an MCP server that refuses to accept a test on faith: every generated test must survive a staged quality pipeline — execution, coverage gain, smell detection, flakiness, property-based counterexamples, fuzzing, and mutation testing — before it is kept.
 
-The premise is that coverage alone is a weak signal. A generated suite can hit 95% of lines and still assert nothing meaningful. TestForge measures whether the tests would actually fail when the code is wrong, and feeds surviving mutants back to the agent as targeted regeneration work.
+The premise is that coverage alone is a weak signal. A generated suite can hit 95% of lines and still assert nothing meaningful. Bob the Tester measures whether the tests would actually fail when the code is wrong, and feeds surviving mutants back to the agent as targeted regeneration work.
 
 ## How it works
 
@@ -64,7 +64,7 @@ Requires Python 3.11+.
 ```bash
 pip install -e .              # server core
 pip install -e ".[dev]"       # + pipeline tools and dashboard
-cp .env.example .env          # CONTEXT7_API_KEY, TESTFORGE_REPLAY, BOBSHELL_API_KEY
+cp .env.example .env          # CONTEXT7_API_KEY, BOB_THE_TESTER_REPLAY, BOBSHELL_API_KEY
 ```
 
 Verify the server end to end without involving the agent:
@@ -76,12 +76,12 @@ python scripts/smoke.py
 The smoke script is the integration safety net — it exercises every registered tool against `sample_repo/` and is expected to pass on `main` at all times.
 
 ```bash
-testforge-server                          # run the MCP server (STDIO)
-streamlit run dashboard/app.py            # view results from the last run
-python scripts/reset_demo.py              # restore sample_repo/tests to pristine state
+bob-the-tester-server            # run the MCP server (STDIO)
+streamlit run dashboard/app.py   # view results from the last run
+python scripts/reset_demo.py     # restore sample_repo/tests to pristine state
 ```
 
-Setting `TESTFORGE_REPLAY=1` makes every tool return cached results keyed on `(tool, args-hash)` — fast, deterministic reruns for demos and rehearsals.
+Setting `BOB_THE_TESTER_REPLAY=1` makes every tool return cached results keyed on `(tool, args-hash)` — fast, deterministic reruns for demos and rehearsals.
 
 ## Development
 
@@ -99,7 +99,7 @@ Two files are frozen contracts: `server/schema.py` and `server/data/models.py`. 
 
 Nobody hand-edits `sample_repo/tests/`. Those tests come from Bob sessions, and `scripts/reset_demo.py` restores the directory.
 
-Generated artifacts stay out of git — `testforge.db`, `coverage.xml`, `.mutmut-cache`, `__pycache__`, and fuzz corpora are all ignored. One blessed replay-cache snapshot is committed before the demo freeze so the replay path works on any machine.
+Generated artifacts stay out of git — `bob-the-tester.db`, `coverage.xml`, `.mutmut-cache`, `__pycache__`, and fuzz corpora are all ignored. One blessed replay-cache snapshot is committed before the demo freeze so the replay path works on any machine.
 
 ## Background
 
