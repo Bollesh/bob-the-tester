@@ -1,1 +1,1 @@
-"""TestForge server package."""
+"""Bob the Tester server package."""

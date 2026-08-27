@@ -7,7 +7,7 @@ Exercises every P1 tool WITHOUT Bob.  Must pass green on main before
 anyone leaves for the day (AGENTS.md §6 merge rule 5).
 
 Usage:
-    cd testforge
+    cd bob-the-tester
     pip install -e .
     python scripts/smoke.py
 
@@ -45,13 +45,13 @@ if sys.platform == "win32":
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 # ── Path setup ────────────────────────────────────────────────────────────────
-REPO_ROOT = Path(__file__).resolve().parent.parent          # testforge/
+REPO_ROOT = Path(__file__).resolve().parent.parent          # bob-the-tester/
 SAMPLE_ROOT = REPO_ROOT / "sample_repo"
 SAMPLE_SRC = SAMPLE_ROOT / "src" / "calculator.py"
 SAMPLE_TESTS_DIR = SAMPLE_ROOT / "tests"
 SAMPLE_TEST_FILE = SAMPLE_TESTS_DIR / "test_placeholder.py"
 
-# Add testforge/ to sys.path so server imports work without installing
+# Add bob-the-tester/ to sys.path so server imports work without installing
 sys.path.insert(0, str(REPO_ROOT))
 
 from server.core.coverage import get_coverage, list_uncovered

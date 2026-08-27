@@ -1,5 +1,5 @@
 # ── Runtime / transient artifacts (never commit) ─────────────────────────────
-testforge.db
+bob-the-tester.db
 *.db-shm
 *.db-wal
 

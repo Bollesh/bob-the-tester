@@ -3,7 +3,7 @@ requires = ["setuptools>=42"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "testforge"
+name = "bob-the-tester"
 version = "0.1.0"
 description = "AI-powered test generation and QA framework — IBM SkillsBuild Hackathon"
 requires-python = ">=3.11"
@@ -34,7 +34,7 @@ dashboard = [
 ]
 # Install everything
 dev = [
-    "testforge[pipeline,dashboard]",
+    "bob-the-tester[pipeline,dashboard]",
 ]
 
 [tool.setuptools.packages.find]
@@ -42,7 +42,7 @@ where = ["."]
 include = ["server*"]
 
 [project.scripts]
-testforge-server = "server.main:main"
+bob-the-tester-server = "server.main:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

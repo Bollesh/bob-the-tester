@@ -1,5 +1,5 @@
 """
-TestForge MCP Server — entry point and tool registration.
+Bob the Tester MCP Server — entry point and tool registration.
 
 Ownership and merge rules (from AGENTS.md §6):
     P1 registers core tools in the P1 block below.
@@ -15,8 +15,8 @@ Ownership and merge rules (from AGENTS.md §6):
     This file only does: import → register → dispatch.
 
 Usage:
-    python -m server.main          (direct)
-    testforge-server               (installed entry-point)
+    python -m server.main     (direct)
+    bob-the-tester-server     (installed entry-point)
     Registered in .bob/mcp.json as STDIO transport.
 """
 from __future__ import annotations
@@ -47,14 +47,14 @@ from server.core.validate import validate_and_keep
 # ── P4 data imports (added here when P4 branch merges) ──────────────────────
 # Pattern:
 #   from server.data.logging_mw import log_tool_call   # wrap result before return
-#   from server.data.replay import replay_or_run        # TESTFORGE_REPLAY gate
+#   from server.data.replay import replay_or_run        # BOB_THE_TESTER_REPLAY gate
 #   from server.gaps import explain_gaps
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr,
-                    format="%(asctime)s [testforge] %(levelname)s %(message)s")
-logger = logging.getLogger("testforge")
+                    format="%(asctime)s [bob-the-tester] %(levelname)s %(message)s")
+logger = logging.getLogger("bob-the-tester")
 
-app = Server("testforge")
+app = Server("bob-the-tester")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

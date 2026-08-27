@@ -1,8 +1,8 @@
-# TestForge — FROZEN schema (Day 1 contract)
+# Bob the Tester — FROZEN schema (Day 1 contract)
 # DO NOT MODIFY outside a `contract-change` PR approved by all team members.
 # See AGENTS.md §3 and §7 (invariant 7).
 """
-ToolResult — the universal return envelope for every MCP tool in TestForge.
+ToolResult — the universal return envelope for every MCP tool in Bob the Tester.
 
 Every tool implementation must return exactly this type.  The MCP server
 dispatcher serialises it to JSON and sends it to Bob via STDIO.
@@ -32,7 +32,7 @@ def _new_run_id() -> str:
 
 
 class ToolResult(BaseModel):
-    """Universal return envelope for every MCP tool in TestForge."""
+    """Universal return envelope for every MCP tool in Bob the Tester."""
 
     # Which tool produced this result
     tool: str

@@ -7,7 +7,7 @@ so the demo can be re-run cleanly.
 What it resets:
   - sample_repo/tests/ → restores test_placeholder.py to the committed
     pristine baseline and deletes any Bob-generated tests
-  - testforge.db → deleted (P4 re-creates it on next run)
+  - bob-the-tester.db → deleted (P4 re-creates it on next run)
   - Any stale coverage.xml / .mutmut-cache / __pycache__ artifacts
 
 Usage:
@@ -61,7 +61,7 @@ def test_subtract_positive():
 '''
 
 PATHS_TO_DELETE = [
-    REPO_ROOT / "testforge.db",
+    REPO_ROOT / "bob-the-tester.db",
     REPO_ROOT / "coverage.xml",
     REPO_ROOT / ".coverage",
     REPO_ROOT / ".mutmut-cache",
@@ -79,7 +79,7 @@ GLOB_PATTERNS_TO_DELETE = [
 def reset(dry_run: bool = False) -> None:
     tag = "[DRY RUN] " if dry_run else ""
 
-    print(f"\n{tag}TestForge demo reset\n{'─' * 50}")
+    print(f"\n{tag}Bob the Tester demo reset\n{'─' * 50}")
 
     # ── 1. Restore pristine test file ─────────────────────────────────────
     placeholder = SAMPLE_TESTS_DIR / "test_placeholder.py"
@@ -125,7 +125,7 @@ def reset(dry_run: bool = False) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Reset TestForge demo state")
+    parser = argparse.ArgumentParser(description="Reset Bob the Tester demo state")
     parser.add_argument(
         "--dry-run",
         action="store_true",
