@@ -13,7 +13,11 @@ Details payload (AGENTS.md §5):
     mutation_score float — killed / (killed + missed), 0.0–1.0
     killed         int   — mutants the suite detected
     survived       list  — [{id, line, original, mutated, status, function}]
-                           every mutant the suite did NOT kill
+                           every mutant the suite did NOT kill.  Beyond the
+                           first _MAX_DETAILED_SURVIVORS entries the diff is
+                           omitted (detail_omitted=True) to bound subprocess
+                           count; the count is reported, never silently cut.
+    detail_omitted_count int — survivors reported without diff detail
     survived_count int   — len(survived)
     not_covered    int   — subset of survived that no test executed at all
     total          int   — mutants generated
@@ -70,6 +74,11 @@ from server.schema import ToolResult
 _DEFAULT_TIMEOUT_S = 900        # mutation testing is the slowest stage by far
 _RESULTS_TIMEOUT_S = 120
 _SHOW_TIMEOUT_S = 30
+
+# Cap on how many survivors get their original->mutated diff fetched.  Each
+# costs one `mutmut show` subprocess.  Survivors beyond the cap are still
+# reported (id, function, status) with detail_omitted=True.
+_MAX_DETAILED_SURVIVORS = 100
 
 # Directories never worth copying into the temp workspace.
 _COPY_EXCLUDES = shutil.ignore_patterns(
@@ -437,8 +446,18 @@ def mutation_test(
             else:
                 inconclusive += 1
 
+        # Detailing a survivor costs one `mutmut show` subprocess each, so the
+        # loop is capped.  A module with thousands of survivors would otherwise
+        # spawn thousands of processes for data Bob cannot act on in one round
+        # anyway.  Every survivor is still REPORTED — only the diff detail is
+        # limited — and the cap is stated in details/verdict rather than
+        # silently truncating (see AGENTS.md: no silent caps).
+        ordered_ids = sorted(missed_ids)
+        detailed_ids = ordered_ids[:_MAX_DETAILED_SURVIVORS]
+        undetailed_ids = ordered_ids[_MAX_DETAILED_SURVIVORS:]
+
         survived: list[dict[str, Any]] = []
-        for mutant_id in sorted(missed_ids):
+        for mutant_id in detailed_ids:
             original = mutated = ""
             try:
                 show_proc = _run_mutmut(["show", mutant_id], workspace, _SHOW_TIMEOUT_S)
@@ -454,6 +473,19 @@ def mutation_test(
                 "mutated": mutated,
                 "status": statuses[mutant_id],
                 "function": function,
+            })
+
+        # Beyond the cap: id, function and status without the diff.
+        for mutant_id in undetailed_ids:
+            function = _function_of(mutant_id)
+            survived.append({
+                "id": mutant_id,
+                "line": _resolve_line(source_lines, spans, function, ""),
+                "original": "",
+                "mutated": "",
+                "status": statuses[mutant_id],
+                "function": function,
+                "detail_omitted": True,
             })
 
         survived_count = len(survived)
@@ -489,6 +521,11 @@ def mutation_test(
 
         if inconclusive:
             verdict += f" [{inconclusive} inconclusive, excluded from score]"
+        if undetailed_ids:
+            verdict += (
+                f" [diff detail omitted for {len(undetailed_ids)} survivor(s) "
+                f"beyond the first {_MAX_DETAILED_SURVIVORS}]"
+            )
 
         return ToolResult(
             tool="mutation_test",
@@ -506,6 +543,7 @@ def mutation_test(
                 "scored_total": scored_total,
                 "inconclusive": inconclusive,
                 "by_status": by_status,
+                "detail_omitted_count": len(undetailed_ids),
                 "target_module": rel_module.as_posix(),
                 "engine_available": True,
             },
