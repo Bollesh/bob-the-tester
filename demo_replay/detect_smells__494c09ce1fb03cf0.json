@@ -1,0 +1,23 @@
+{
+  "tool": "detect_smells",
+  "key": "494c09ce1fb03cf0",
+  "normalised_args": {
+    "test_file": "sample_repo/tests/test_placeholder.py"
+  },
+  "result": {
+    "tool": "detect_smells",
+    "ok": true,
+    "score": 1.0,
+    "proceed": true,
+    "verdict": "3 tests scanned, no smells detected",
+    "details": {
+      "findings": [],
+      "tests_scanned": 3,
+      "smell_score": 1.0,
+      "by_type": {}
+    },
+    "artifacts": [],
+    "duration_ms": 0,
+    "run_id": "971ec504-365f-4f00-b794-d6f1ecedcb78"
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "tool": "run_flaky_check",
+  "key": "589661e0aca7a3fd",
+  "normalised_args": {
+    "cwd": "sample_repo",
+    "n": 3,
+    "test_file": "sample_repo/tests/test_placeholder.py"
+  },
+  "result": {
+    "tool": "run_flaky_check",
+    "ok": true,
+    "score": 1.0,
+    "proceed": true,
+    "verdict": "3 tests stable across 3 runs, no flakiness",
+    "details": {
+      "outcomes": {
+        "sample_repo.tests.test_placeholder::test_add_positive": [
+          "passed",
+          "passed",
+          "passed"
+        ],
+        "sample_repo.tests.test_placeholder::test_add_zero": [
+          "passed",
+          "passed",
+          "passed"
+        ],
+        "sample_repo.tests.test_placeholder::test_subtract_positive": [
+          "passed",
+          "passed",
+          "passed"
+        ]
+      },
+      "flaky": [],
+      "stable": [
+        "sample_repo.tests.test_placeholder::test_add_positive",
+        "sample_repo.tests.test_placeholder::test_add_zero",
+        "sample_repo.tests.test_placeholder::test_subtract_positive"
+      ],
+      "consistently_failing": [],
+      "runs": 3,
+      "runs_completed": 3,
+      "timed_out": 0,
+      "parse_errors": [],
+      "stopped_early": ""
+    },
+    "artifacts": [],
+    "duration_ms": 1031,
+    "run_id": "971ec504-365f-4f00-b794-d6f1ecedcb78"
+  }
+}

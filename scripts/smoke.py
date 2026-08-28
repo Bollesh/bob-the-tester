@@ -39,6 +39,24 @@ What it tests:
     12. mutation_test      — mutants generated, survivors carry resolved file
                              lines and original→mutated source
 
+    P4 data layer:
+    13. data layer      — schema, run/tool_call/test/coverage/mutation writers,
+                          and the read-only reader API the dashboard uses
+    14. logging_mw      — every call lands in tool_calls; structured payloads
+                          fan out to the typed tables; the result is returned
+                          unchanged even when the tool itself failed
+    15. replay cache    — keys ignore run_id and are path-portable across
+                          machines; BOB_THE_TESTER_REPLAY=1 serves cached
+                          results without executing anything
+    16. explain_gaps    — real uncovered regions with function context and
+                          objective signals; finds its own coverage report
+    17. store_explanation / save_test_record
+                        — gap prose persists; a defect-finding test is KEPT
+                          and recorded in bugs_found, a wrong test is not
+
+Checks 13–17 use a temporary database and replay directory, so a smoke run
+never touches bob-the-tester.db or the blessed demo_replay/ snapshot.
+
 Stages 10–12 depend on optional engines (Hypothesis, Atheris, mutmut).  When
 an engine is absent the check asserts CLEAN DEGRADATION instead — proceed
 stays true and engine_available reports false — so a machine without the
@@ -669,13 +687,320 @@ else:
 # ── Clean up P2 fixtures ─────────────────────────────────────────────────────
 shutil.rmtree(P2_TMP, ignore_errors=True)
 
+# ═════════════════════════════════════════════════════════════════════════════
+# P4 — DATA LAYER, REPLAY CACHE, GAP TOOLS
+#
+# These run against a TEMPORARY database and a TEMPORARY replay directory, so
+# a smoke run never pollutes the demo database or the blessed demo_replay/
+# snapshot.  Both are selected purely through environment variables, which is
+# also the mechanism the CI job and reset_demo.py use.
+# ═════════════════════════════════════════════════════════════════════════════
+
+P4_TMP = Path(tempfile.mkdtemp(prefix="bob_p4_"))
+os.environ["BOB_THE_TESTER_DB"] = str(P4_TMP / "smoke.db")
+os.environ["BOB_THE_TESTER_REPLAY_DIR"] = str(P4_TMP / "replay")
+os.environ["BOB_THE_TESTER_REPLAY"] = "0"
+
+from server.data import db as p4_db                      # noqa: E402
+from server.data.logging_mw import log_tool_call         # noqa: E402
+from server.data.models import SCHEMA_VERSION            # noqa: E402
+from server.data import replay as p4_replay              # noqa: E402
+from server.gaps import (                                # noqa: E402
+    explain_gaps,
+    save_test_record,
+    store_explanation,
+)
+
+P4_RUN = "smoke-run-0000"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check 13: database schema + writers + readers
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("13 - data layer: schema, writers, readers")
+
+check("temp DB path is honoured", p4_db.db_path() == (P4_TMP / "smoke.db").resolve()
+      or str(p4_db.db_path()).endswith("smoke.db"), str(p4_db.db_path()))
+
+p4_db.start_run(P4_RUN, source_file="sample_repo/src/calculator.py",
+                coverage_target=85.0, mutation_target=0.8, max_iterations=3)
+runs = p4_db.list_runs()
+check("run row created", any(r["run_id"] == P4_RUN for r in runs),
+      f"got {[r['run_id'] for r in runs]}")
+
+run_row = p4_db.get_run(P4_RUN)
+check("run targets persisted",
+      run_row is not None and run_row["coverage_target"] == 85.0
+      and run_row["max_iterations"] == 3)
+check("schema version stamped", SCHEMA_VERSION >= 1)
+
+p4_db.finish_run(P4_RUN, status="complete", iterations_used=2)
+run_row = p4_db.get_run(P4_RUN)
+check("finish_run closes the run",
+      run_row["status"] == "complete" and run_row["iterations_used"] == 2)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check 14: logging middleware writes tool_calls and fans out
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("14 - logging middleware: tool_calls + typed fan-out")
+
+cov_result = ToolResult(
+    tool="get_coverage", ok=True, score=0.4, proceed=True,
+    verdict="Coverage: 40.0%",
+    details={"percent": 40.0, "covered_lines": [1, 2, 3, 4],
+             "uncovered_ranges": [{"start": 10, "end": 12}], "uncovered_count": 3},
+    artifacts=["coverage.xml"], duration_ms=12, run_id=P4_RUN,
+)
+log_tool_call(cov_result, {"report_path": "coverage.xml",
+                           "source_file": "src/calculator.py"})
+
+logged = p4_db.tool_calls_for_run(P4_RUN)
+check("tool_call row written", len(logged) == 1, f"got {len(logged)}")
+check("details round-trip as a dict",
+      isinstance(logged[0]["details"], dict)
+      and logged[0]["details"]["percent"] == 40.0)
+check("artifacts round-trip as a list",
+      logged[0]["artifacts"] == ["coverage.xml"])
+
+points = p4_db.coverage_for_run(P4_RUN)
+check("get_coverage fanned out to coverage_history", len(points) == 1)
+check("coverage percent promoted to a real column",
+      points and points[0]["percent"] == 40.0)
+
+validate_result = ToolResult(
+    tool="validate_and_keep", ok=True, score=1.0, proceed=True,
+    verdict="kept", details={"kept": True, "reason": "coverage 40.0 -> 55.0",
+                             "coverage_before": 40.0, "coverage_after": 55.0,
+                             "rollback_performed": False},
+    artifacts=[], duration_ms=900, run_id=P4_RUN,
+)
+log_tool_call(validate_result, {
+    "test_file": "tests/test_calculator.py",
+    "candidate": {"test_code": "def test_divide_by_zero():\n    pass"},
+})
+test_rows = p4_db.tests_for_run(P4_RUN)
+check("validate_and_keep fanned out to tests", len(test_rows) == 1)
+check("test name recovered from the candidate code",
+      test_rows and test_rows[0]["test_name"] == "test_divide_by_zero",
+      f"got {test_rows[0]['test_name'] if test_rows else None!r}")
+check("keep decision + reason stored",
+      test_rows and test_rows[0]["kept"] == 1
+      and "coverage" in test_rows[0]["reason"])
+
+flaky_result = ToolResult(
+    tool="run_flaky_check", ok=True, score=0.5, proceed=False,
+    verdict="1 flaky test",
+    details={"runs": 5, "flaky": [{"test_id": "test_wobbly",
+                                   "outcomes": ["passed", "failed"]}],
+             "consistently_failing": []},
+    artifacts=[], duration_ms=2000, run_id=P4_RUN,
+)
+log_tool_call(flaky_result, {"test_file": "tests/test_calculator.py"})
+test_rows = p4_db.tests_for_run(P4_RUN)
+flaky_rows = [r for r in test_rows if r["stage"] == "flaky"]
+check("flaky test recorded as a discard",
+      len(flaky_rows) == 1 and flaky_rows[0]["kept"] == 0)
+
+mutation_result = ToolResult(
+    tool="mutation_test", ok=True, score=0.6, proceed=True,
+    verdict="mutation score 0.6",
+    details={"mutation_score": 0.6, "killed": 6, "survived_count": 4,
+             "not_covered": 1, "total": 10, "inconclusive": 0,
+             "survived": [{"id": "m1", "line": 12, "original": "a + b",
+                           "mutated": "a - b", "status": "survived"}],
+             "engine_available": True},
+    artifacts=[], duration_ms=30000, run_id=P4_RUN,
+)
+log_tool_call(mutation_result, {"target_module": "src/calculator.py"})
+mut_rows = p4_db.mutation_for_run(P4_RUN)
+check("mutation_test fanned out to mutation_results", len(mut_rows) == 1)
+check("survivors round-trip with their detail",
+      mut_rows and mut_rows[0]["survivors"]
+      and mut_rows[0]["survivors"][0]["mutated"] == "a - b")
+
+crashed = ToolResult(
+    tool="run_fuzz", ok=False, score=0.0, proceed=True,
+    verdict="Atheris not installed", details={"error": "no engine"},
+    artifacts=[], duration_ms=5, run_id=P4_RUN,
+)
+returned = log_tool_call(crashed, {"harness_path": "h.py"})
+check("middleware returns the result unchanged",
+      returned is crashed and returned.ok is False and returned.proceed is True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check 15: replay cache
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("15 - replay cache: keys, round-trip, and the REPLAY switch")
+
+args_a = {"report_path": "coverage.xml", "source_file": "src/calculator.py",
+          "run_id": "run-aaa"}
+args_b = dict(args_a, run_id="run-bbb")
+check("cache key ignores run_id",
+      p4_replay.cache_key("get_coverage", args_a)
+      == p4_replay.cache_key("get_coverage", args_b))
+
+abs_args = {"cwd": str(SAMPLE_ROOT)}
+rel_args = {"cwd": "sample_repo"}
+check("cache key rewrites repo-absolute paths to relative (portable snapshot)",
+      p4_replay.cache_key("run_tests", abs_args)
+      == p4_replay.cache_key("run_tests", rel_args),
+      f"{p4_replay.normalise_args(abs_args)} vs {p4_replay.normalise_args(rel_args)}")
+
+check("differing args produce differing keys",
+      p4_replay.cache_key("get_coverage", args_a)
+      != p4_replay.cache_key("get_coverage", {"report_path": "other.xml"}))
+
+live_calls = {"n": 0}
+
+
+def _fake_tool() -> ToolResult:
+    live_calls["n"] += 1
+    return ToolResult(
+        tool="run_tests", ok=True, score=1.0, proceed=True,
+        verdict="12 passed, 0 failed", details={"passed": 12, "failed": 0},
+        artifacts=[], duration_ms=4210, run_id=args_a["run_id"],
+    )
+
+
+os.environ["BOB_THE_TESTER_REPLAY"] = "0"
+result, replayed = p4_replay.replay_or_run("run_tests", args_a, _fake_tool)
+check("live mode executes the tool", live_calls["n"] == 1 and replayed is False)
+check("live result recorded to the snapshot",
+      p4_replay.load("run_tests", args_a) is not None)
+
+os.environ["BOB_THE_TESTER_REPLAY"] = "1"
+check("replay_enabled() reads the env switch", p4_replay.replay_enabled() is True)
+result, replayed = p4_replay.replay_or_run("run_tests", args_b, _fake_tool)
+check("replay mode does NOT execute the tool", live_calls["n"] == 1,
+      f"tool ran {live_calls['n']} times")
+check("replay mode reports replayed=True", replayed is True)
+check("replayed result is identical", result.verdict == "12 passed, 0 failed"
+      and result.details["passed"] == 12)
+check("replayed result is re-stamped with the CURRENT run_id",
+      result.run_id == "run-bbb", f"got {result.run_id}")
+
+result, replayed = p4_replay.replay_or_run(
+    "run_tests", {"report_path": "never-seen.xml"}, _fake_tool)
+check("a cache MISS in replay mode falls through to live execution",
+      live_calls["n"] == 2 and replayed is False)
+
+os.environ["BOB_THE_TESTER_REPLAY"] = "0"
+snap = p4_replay.snapshot_summary()
+check("snapshot summary counts entries", snap["entries"] >= 1, str(snap))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check 16: explain_gaps against a real coverage report
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("16 - explain_gaps on sample_repo/src/calculator.py")
+
+cov_xml_p4, _ = _run_coverage_for_smoke(SAMPLE_ROOT)
+result = explain_gaps(source_file=str(SAMPLE_SRC), report_path=cov_xml_p4,
+                      run_id=P4_RUN)
+
+check("ok=True", result.ok, result.verdict)
+check("proceed=True (reporting never gates)", result.proceed)
+gaps_found = result.details.get("gaps", [])
+check("uncovered regions found", len(gaps_found) > 0,
+      "baseline suite only covers add/subtract, so gaps must exist")
+if gaps_found:
+    first_gap = gaps_found[0]
+    check("gap resolves its enclosing function", bool(first_gap.get("function")))
+    check("gap carries a source snippet", bool(first_gap.get("snippet")))
+    check("gap carries objective signals, not a verdict",
+          isinstance(first_gap.get("signals"), dict)
+          and "in_main_guard" in first_gap["signals"])
+    check("gap line range is inside the file",
+          1 <= first_gap["start"] <= len(SAMPLE_SRC.read_text(
+              encoding="utf-8").splitlines()))
+print(f"     {result.verdict}")
+
+# Report discovery via the tool_calls log: no report_path passed at all.
+log_tool_call(
+    ToolResult(tool="get_coverage", ok=True, score=0.4, proceed=True,
+               verdict="logged for discovery",
+               details={"percent": 40.0, "covered_lines": [],
+                        "uncovered_count": 0},
+               artifacts=[cov_xml_p4], duration_ms=1, run_id=P4_RUN),
+    {"report_path": cov_xml_p4},
+)
+discovered = explain_gaps(source_file=str(SAMPLE_SRC), run_id=P4_RUN)
+check("report discovered from the tool_calls log when not passed",
+      discovered.ok and discovered.details.get("report_found_via", "").startswith(
+          "tool_calls"),
+      discovered.details.get("report_found_via", discovered.verdict))
+
+missing = explain_gaps(source_file="does/not/exist.py", run_id=P4_RUN)
+check("missing source degrades to ok=False but proceed=True",
+      missing.ok is False and missing.proceed is True, missing.verdict)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check 17: store_explanation + save_test_record (incl. the defect path)
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("17 - store_explanation + save_test_record (bug-vs-wrong-test)")
+
+result = store_explanation(
+    text="The `__main__` guard is never executed under pytest - intentional skip.",
+    source_file=str(SAMPLE_SRC), gaps=gaps_found[:1], run_id=P4_RUN,
+)
+check("ok=True", result.ok, result.verdict)
+stored_gaps = p4_db.gaps_for_run(P4_RUN)
+check("explanation persisted", len(stored_gaps) == 1)
+check("narrated gaps stored beside the prose",
+      stored_gaps and isinstance(stored_gaps[0]["gaps"], list))
+
+empty = store_explanation(text="   ", run_id=P4_RUN)
+check("empty explanation is rejected without gating",
+      empty.ok is False and empty.proceed is True, empty.verdict)
+
+result = save_test_record(
+    test_name="test_regression_rounding_negative_half",
+    test_file="tests/test_rounding.py", kept=True,
+    reason="Hypothesis found round(-0.5) returns 0, docstring promises -1",
+    stage="regression", bug_found=True,
+    source_file="sample_repo/src/rounding.py",
+    evidence="shrunk_input=-0.5", run_id=P4_RUN,
+)
+check("ok=True", result.ok, result.verdict)
+check("defect reported as bug_recorded", result.details.get("bug_recorded") is True)
+
+bug_rows = p4_db.bugs_for_run(P4_RUN)
+check("bugs_found row written", len(bug_rows) == 1)
+check("evidence stored for the defect",
+      bug_rows and "-0.5" in bug_rows[0]["evidence"])
+
+kept_rows = [r for r in p4_db.tests_for_run(P4_RUN) if r["bug_found"] == 1]
+check("a defect-finding test is KEPT, not discarded",
+      len(kept_rows) == 1 and kept_rows[0]["kept"] == 1)
+
+wrong = save_test_record(
+    test_name="test_asserts_wrong_thing", kept=False,
+    reason="asserted 3 == 4; the source docstring specifies 3",
+    stage="regression", bug_found=False, run_id=P4_RUN,
+)
+check("wrong-test path records a discard and no bug",
+      wrong.ok and wrong.details.get("bug_recorded") is False
+      and len(p4_db.bugs_for_run(P4_RUN)) == 1)
+
+# ── Clean up P4 fixtures ─────────────────────────────────────────────────────
+for _var in ("BOB_THE_TESTER_DB", "BOB_THE_TESTER_REPLAY_DIR", "BOB_THE_TESTER_REPLAY"):
+    os.environ.pop(_var, None)
+try:
+    Path(cov_xml_p4).unlink(missing_ok=True)
+except Exception:  # noqa: BLE001
+    pass
+shutil.rmtree(P4_TMP, ignore_errors=True)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary
 # ─────────────────────────────────────────────────────────────────────────────
 
 section("SUMMARY")
 if not failures:
-    print(f"\n  {PASS} All P1 + P2 smoke checks passed.")
+    print(f"\n  {PASS} All P1 + P2 + P4 smoke checks passed.")
     print(f"  Server is ready. Register in .bob/mcp.json and run Bob's skill.\n")
     sys.exit(0)
 else:

@@ -1,0 +1,138 @@
+{
+  "tool": "explain_gaps",
+  "key": "971f371279936e29",
+  "normalised_args": {
+    "report_path": "sample_repo/coverage.xml",
+    "source_file": "sample_repo/src/calculator.py"
+  },
+  "result": {
+    "tool": "explain_gaps",
+    "ok": true,
+    "score": 0.2558,
+    "proceed": true,
+    "verdict": "6 uncovered region(s) across 32 lines in calculator.py (25.58% covered)",
+    "details": {
+      "source_file": "D:\\workspace\\bob-the-tester\\sample_repo\\src\\calculator.py",
+      "report_path": "D:\\workspace\\bob-the-tester\\sample_repo\\coverage.xml",
+      "report_found_via": "argument",
+      "percent": 25.58,
+      "gaps": [
+        {
+          "start": 30,
+          "end": 30,
+          "line_count": 1,
+          "function": "multiply",
+          "signature": "def multiply(a, b)",
+          "docstring": "Return a * b.",
+          "snippet": "  30 |     return a * b",
+          "signals": {
+            "in_main_guard": false,
+            "raises_only": false,
+            "has_raise": false,
+            "in_except_handler": false,
+            "is_logging_only": false,
+            "decorators": [],
+            "line_count": 1
+          }
+        },
+        {
+          "start": 41,
+          "end": 45,
+          "line_count": 5,
+          "function": "divide",
+          "signature": "def divide(a, b)",
+          "docstring": "Return a / b.",
+          "snippet": "  41 |     if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):\n  42 |         raise TypeError(f\"Operands must be numeric, got {type(a)} and {type(b)}\")\n  43 |     if b == 0:\n  44 |         raise ZeroDivisionError(\"Division by zero\")\n  45 |     return a / b",
+          "signals": {
+            "in_main_guard": false,
+            "raises_only": false,
+            "has_raise": true,
+            "in_except_handler": false,
+            "is_logging_only": false,
+            "decorators": [],
+            "line_count": 5
+          }
+        },
+        {
+          "start": 50,
+          "end": 52,
+          "line_count": 3,
+          "function": "power",
+          "signature": "def power(base, exp)",
+          "docstring": "Return base ** exp.  Negative exponents are allowed.",
+          "snippet": "  50 |     if not isinstance(exp, int):\n  51 |         raise TypeError(f\"Exponent must be an integer, got {type(exp)}\")\n  52 |     return base ** exp",
+          "signals": {
+            "in_main_guard": false,
+            "raises_only": false,
+            "has_raise": true,
+            "in_except_handler": false,
+            "is_logging_only": false,
+            "decorators": [],
+            "line_count": 3
+          }
+        },
+        {
+          "start": 63,
+          "end": 72,
+          "line_count": 10,
+          "function": "factorial",
+          "signature": "def factorial(n)",
+          "docstring": "Return n! for non-negative integer n.",
+          "snippet": "  63 |     if not isinstance(n, int):\n  64 |         raise TypeError(f\"n must be an integer, got {type(n)}\")\n  65 |     if n < 0:\n  66 |         raise ValueError(f\"Factorial is not defined for negative numbers, got {n}\")\n  67 |     if n == 0:\n  68 |         return 1\n  69 |     result = 1\n  70 |     for i in range(2, n + 1):\n  71 |         result *= i\n  72 |     return result",
+          "signals": {
+            "in_main_guard": false,
+            "raises_only": false,
+            "has_raise": true,
+            "in_except_handler": false,
+            "is_logging_only": false,
+            "decorators": [],
+            "line_count": 10
+          }
+        },
+        {
+          "start": 77,
+          "end": 86,
+          "line_count": 10,
+          "function": "is_prime",
+          "signature": "def is_prime(n)",
+          "docstring": "Return True if n is a prime number.",
+          "snippet": "  77 |     if n < 2:\n  78 |         return False\n  79 |     if n == 2:\n  80 |         return True\n  81 |     if n % 2 == 0:\n  82 |         return False\n  83 |     for i in range(3, int(n ** 0.5) + 1, 2):\n  84 |         if n % i == 0:\n  85 |             return False\n  86 |     return True",
+          "signals": {
+            "in_main_guard": false,
+            "raises_only": false,
+            "has_raise": false,
+            "in_except_handler": false,
+            "is_logging_only": false,
+            "decorators": [],
+            "line_count": 10
+          }
+        },
+        {
+          "start": 91,
+          "end": 93,
+          "line_count": 3,
+          "function": "gcd",
+          "signature": "def gcd(a, b)",
+          "docstring": "Return the greatest common divisor of a and b (Euclidean algorithm).",
+          "snippet": "  91 |     while b:\n  92 |         a, b = b, a % b\n  93 |     return abs(a)",
+          "signals": {
+            "in_main_guard": false,
+            "raises_only": false,
+            "has_raise": false,
+            "in_except_handler": false,
+            "is_logging_only": false,
+            "decorators": [],
+            "line_count": 3
+          }
+        }
+      ],
+      "gap_count": 6,
+      "total_uncovered": 32
+    },
+    "artifacts": [
+      "D:\\workspace\\bob-the-tester\\sample_repo\\coverage.xml"
+    ],
+    "duration_ms": 16,
+    "run_id": "971ec504-365f-4f00-b794-d6f1ecedcb78"
+  }
+}

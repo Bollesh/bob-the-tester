@@ -1,0 +1,60 @@
+{
+  "tool": "list_uncovered",
+  "key": "b81588112d90b58d",
+  "normalised_args": {
+    "source_file": "sample_repo/src/calculator.py"
+  },
+  "result": {
+    "tool": "list_uncovered",
+    "ok": true,
+    "score": 1.0,
+    "proceed": true,
+    "verdict": "6 uncovered range(s) in calculator.py",
+    "details": {
+      "gaps": [
+        {
+          "start": 30,
+          "end": 30,
+          "function": "multiply",
+          "snippet": "    return a * b"
+        },
+        {
+          "start": 41,
+          "end": 45,
+          "function": "divide",
+          "snippet": "    if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):\n        raise TypeError(f\"Operands must be numeric, got {type(a)} and {type(b)}\")\n    if b == 0:\n        raise ZeroDivisionError(\"Division by zero\")\n    return a / b"
+        },
+        {
+          "start": 50,
+          "end": 52,
+          "function": "power",
+          "snippet": "    if not isinstance(exp, int):\n        raise TypeError(f\"Exponent must be an integer, got {type(exp)}\")\n    return base ** exp"
+        },
+        {
+          "start": 63,
+          "end": 72,
+          "function": "factorial",
+          "snippet": "    if not isinstance(n, int):\n        raise TypeError(f\"n must be an integer, got {type(n)}\")\n    if n < 0:\n        raise ValueError(f\"Factorial is not defined for negative numbers, got {n}\")\n    if n == 0:\n        return 1\n    result = 1\n    for i in range(2, n + 1):\n        result *= i\n    return result"
+        },
+        {
+          "start": 77,
+          "end": 86,
+          "function": "is_prime",
+          "snippet": "    if n < 2:\n        return False\n    if n == 2:\n        return True\n    if n % 2 == 0:\n        return False\n    for i in range(3, int(n ** 0.5) + 1, 2):\n        if n % i == 0:\n            return False\n    return True"
+        },
+        {
+          "start": 91,
+          "end": 93,
+          "function": "gcd",
+          "snippet": "    while b:\n        a, b = b, a % b\n    return abs(a)"
+        }
+      ],
+      "source_file": "d:\\workspace\\bob-the-tester\\sample_repo\\src\\calculator.py"
+    },
+    "artifacts": [
+      "d:\\workspace\\bob-the-tester\\coverage.xml"
+    ],
+    "duration_ms": 15,
+    "run_id": "calc-gen-cover-01"
+  }
+}
