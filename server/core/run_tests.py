@@ -19,7 +19,9 @@ proceed = False when failed > 0 or errors > 0 (suite is broken).
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -27,6 +29,45 @@ import xml.etree.ElementTree as ET
 from typing import Any
 
 from server.schema import ToolResult
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Argument splitting
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _split_test_command(test_command: str, cwd: str) -> list[str]:
+    """
+    Turn the free-form `test_command` string into argv for pytest.
+
+    A plain `.split()` shatters any path containing a space — a repo under
+    "/New Volume/" collects zero tests — and `shlex.split` does not help on
+    its own, because an UNQUOTED path with a space still splits.
+
+    So: if the whole string names a path that exists (absolute, or relative
+    to cwd), it is one argument and is passed through untouched.  Otherwise
+    it is a real argument string like "tests/ -x -v" and shlex splits it,
+    honouring any quoting the caller supplied.
+    """
+    stripped = test_command.strip()
+    if not stripped:
+        return []
+
+    # Whole string is a single existing path → never split it.
+    if os.path.exists(stripped) or os.path.exists(os.path.join(cwd, stripped)):
+        return [stripped]
+
+    # A pytest node id ("path/to/test.py::test_name") is also one argument.
+    node_path = stripped.partition("::")[0]
+    if node_path != stripped and (
+        os.path.exists(node_path) or os.path.exists(os.path.join(cwd, node_path))
+    ):
+        return [stripped]
+
+    try:
+        return shlex.split(stripped)
+    except ValueError:
+        # Unbalanced quotes — fall back to a naive split rather than crashing.
+        return stripped.split()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -156,9 +197,12 @@ def run_tests(
         junit_path = fh.name
 
     try:
+        # sys.executable, not "python": the bare name is absent on systems
+        # that ship only python3, and it can resolve to a different
+        # interpreter than the one running the server.
         cmd = [
-            "python", "-m", "pytest",
-            *test_command.split(),
+            sys.executable, "-m", "pytest",
+            *_split_test_command(test_command, cwd),
             f"--junit-xml={junit_path}",
             "--tb=short",
             "-q",

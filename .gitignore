@@ -19,9 +19,10 @@ smoke_cov_*.xml
 .mutmut-cache
 html/
 
-# Atheris fuzz corpora
+# Atheris fuzz corpora and crashing inputs written by run_fuzz
 fuzz_corpus/
 crash-*/
+fuzz_crashes/
 
 # Python
 __pycache__/
@@ -35,6 +36,7 @@ build/
 
 # Env
 .env
+bob-the-tester.json
 
 # Editor
 .vscode/

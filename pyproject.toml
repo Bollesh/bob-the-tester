@@ -8,8 +8,11 @@ version = "0.1.0"
 description = "AI-powered test generation and QA framework — IBM SkillsBuild Hackathon"
 requires-python = ">=3.11"
 dependencies = [
-    # MCP server SDK (STDIO transport)
-    "mcp>=1.0.0",
+    # MCP server SDK (STDIO transport).
+    # Upper bound is required: mcp 2.x removed the @app.list_tools() /
+    # @app.call_tool() decorator API that server/main.py is written against
+    # (it is gone from mcp.server.lowlevel too, not merely relocated).
+    "mcp>=1.0,<2",
     # Schema / validation
     "pydantic>=2.0",
     # Test runner + coverage
@@ -25,7 +28,10 @@ dependencies = [
 # P2 pipeline tools
 pipeline = [
     "hypothesis>=6.100",
-    "mutmut>=2.4",
+    # mutmut 3.x only: server/pipeline/mutation.py uses the 3.x config keys
+    # (source_paths / only_mutate) and the 3.x results CLI.  2.x differs on
+    # both and would be misparsed; the tool version-guards against it.
+    "mutmut>=3.0",
     "pytest-rerunfailures>=14.0",
 ]
 # P4 dashboard
@@ -45,5 +51,8 @@ include = ["server*"]
 bob-the-tester-server = "server.main:main"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# There is no tests/ directory at the repo root — the suite under test lives
+# in the demo target.  Pointing at a non-existent path made a bare `pytest`
+# from the repo root collect nothing.
+testpaths = ["sample_repo/tests"]
 addopts = "-v --tb=short"

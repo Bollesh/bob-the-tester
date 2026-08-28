@@ -12,6 +12,8 @@ Details payload (AGENTS.md §5):
     stable      list — test ids whose outcome never changed
     runs        int  — how many times the suite was executed
     runs_completed int— runs that produced a parsable report
+    parse_errors list — per-run JUnit parse failures, if any
+    stopped_early str — set when the total time budget cut the run short
     consistently_failing list — tests that failed in EVERY run.  These are
                        NOT flaky; they are deterministically broken and are
                        reported separately so Bob does not confuse the two.
@@ -44,6 +46,11 @@ from server.schema import ToolResult
 # stops early and reports partial data rather than blocking the pipeline.
 _PER_RUN_TIMEOUT_S = 120
 
+# Ceiling on the WHOLE call.  _MAX_RUNS x _PER_RUN_TIMEOUT_S is 40 minutes,
+# far too long to block a pipeline stage; partial results still detect
+# flakiness, which only needs two differing runs.
+_TOTAL_BUDGET_S = 600
+
 # Guard rails on n — 1 run cannot detect flakiness, and beyond ~20 the
 # wall-clock cost stops being worth it inside a live demo.
 _MIN_RUNS = 2
@@ -54,20 +61,28 @@ _MAX_RUNS = 20
 # Local JUnit parser — one outcome per test case
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _parse_outcomes(xml_path: str) -> dict[str, str]:
+def _parse_outcomes(xml_path: str) -> tuple[dict[str, str], str]:
     """
-    Parse a JUnit XML report into {test_id: outcome}.
+    Parse a JUnit XML report into ({test_id: outcome}, error).
 
     test_id is "classname::name" so that same-named tests in different
     modules do not collide.  Outcome is one of:
     passed / failed / error / skipped.
+
+    `error` is "" on success, otherwise a description.  It is returned
+    rather than swallowed so a malformed report is diagnosable — silently
+    yielding {} made "all runs failed to parse" impossible to debug.
     """
     outcomes: dict[str, str] = {}
 
     try:
         root = ET.parse(xml_path).getroot()
-    except (ET.ParseError, FileNotFoundError, OSError):
-        return outcomes
+    except ET.ParseError as exc:
+        return outcomes, f"JUnit XML malformed: {exc}"
+    except FileNotFoundError:
+        return outcomes, "JUnit XML not found — pytest produced no report"
+    except OSError as exc:
+        return outcomes, f"Could not read JUnit XML: {exc}"
 
     suites = root.findall("testsuite") if root.tag == "testsuites" else [root]
 
@@ -86,7 +101,7 @@ def _parse_outcomes(xml_path: str) -> dict[str, str]:
             else:
                 outcomes[test_id] = "passed"
 
-    return outcomes
+    return outcomes, ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -153,14 +168,30 @@ def run_flaky_check(
     # ── Execute the suite `runs` times ────────────────────────────────────
     per_run: list[dict[str, str]] = []
     timed_out = 0
+    parse_errors: list[str] = []
+    stopped_early = ""
 
-    for _ in range(runs):
+    # Overall wall-clock ceiling.  Without it the worst case is
+    # _MAX_RUNS × _PER_RUN_TIMEOUT_S = 40 minutes, which would stall the
+    # pipeline (and a live demo) with no way to interrupt it.  Partial
+    # results are still usable: flakiness only needs 2 differing runs.
+    deadline = time.monotonic() + _TOTAL_BUDGET_S
+
+    for run_index in range(runs):
+        if run_index > 0 and time.monotonic() >= deadline:
+            stopped_early = (
+                f"stopped after {run_index}/{runs} runs — "
+                f"{_TOTAL_BUDGET_S}s total budget exhausted"
+            )
+            break
+
         with tempfile.NamedTemporaryFile(
             suffix=".xml", delete=False, dir=cwd, prefix="flaky_"
         ) as fh:
             junit_path = fh.name
 
         try:
+            remaining = max(1, int(deadline - time.monotonic()))
             subprocess.run(
                 [
                     sys.executable, "-m", "pytest",
@@ -172,11 +203,14 @@ def run_flaky_check(
                 cwd=cwd,
                 capture_output=True,
                 text=True,
-                timeout=_PER_RUN_TIMEOUT_S,
+                # Never let one run overrun the whole budget.
+                timeout=min(_PER_RUN_TIMEOUT_S, remaining),
             )
-            outcomes = _parse_outcomes(junit_path)
+            outcomes, parse_error = _parse_outcomes(junit_path)
             if outcomes:
                 per_run.append(outcomes)
+            elif parse_error:
+                parse_errors.append(f"run {run_index + 1}: {parse_error}")
 
         except subprocess.TimeoutExpired:
             timed_out += 1
@@ -192,11 +226,14 @@ def run_flaky_check(
                 pass
 
     if not per_run:
+        detail = "; ".join(parse_errors[:3]) if parse_errors else ""
         return _fail(
             f"All {runs} runs failed to produce a parsable report"
-            + (f" ({timed_out} timed out)" if timed_out else ""),
+            + (f" ({timed_out} timed out)" if timed_out else "")
+            + (f": {detail}" if detail else ""),
             {
                 "error": "no_parsable_runs",
+                "parse_errors": parse_errors,
                 "runs": runs,
                 "timed_out": timed_out,
                 "flaky": [],
@@ -257,6 +294,10 @@ def run_flaky_check(
 
     if timed_out:
         verdict += f" [warning: {timed_out} run(s) timed out]"
+    if parse_errors:
+        verdict += f" [warning: {len(parse_errors)} unparsable report(s)]"
+    if stopped_early:
+        verdict += f" [{stopped_early}]"
 
     return ToolResult(
         tool="run_flaky_check",
@@ -272,6 +313,8 @@ def run_flaky_check(
             "runs": runs,
             "runs_completed": len(per_run),
             "timed_out": timed_out,
+            "parse_errors": parse_errors,
+            "stopped_early": stopped_early,
         },
         artifacts=[],
         duration_ms=_elapsed_ms(),

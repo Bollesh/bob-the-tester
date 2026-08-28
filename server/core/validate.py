@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -124,7 +125,7 @@ def _measure_coverage_percent(
 
     try:
         cmd = [
-            "python", "-m", "pytest",
+            sys.executable, "-m", "pytest",
             rel_test,
             f"--cov={cov_target}",
             f"--cov-report=xml:{cov_xml}",

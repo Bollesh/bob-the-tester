@@ -133,13 +133,14 @@ def _run_coverage_for_smoke(cwd: Path) -> tuple[str, int]:
 
     run_start_ms = int(time.time() * 1000)
     cmd = [
-        "python", "-m", "pytest",
+        sys.executable, "-m", "pytest",
         str(SAMPLE_TESTS_DIR),
         "--cov=src",
         f"--cov-report=xml:{cov_xml}",
         "--tb=no", "-q",
     ]
-    subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=60)
+    # 300s, not 60s: a cold cache or a loaded CI box makes 60s a flaky ceiling.
+    subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, timeout=300)
     return cov_xml, run_start_ms
 
 

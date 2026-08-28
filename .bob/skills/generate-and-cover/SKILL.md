@@ -179,9 +179,21 @@ Call: detect_smells(test_file="{test_file}")
 
 **Read from response:**
 - `details.findings[]` → array of `{test_name, smell_type, line, snippet}`
+- `details.by_type` → `{smell_type: count}` summary
+- `details.tests_scanned` → how many test functions were analysed
 - `score` → smell-adjusted quality score
-- `proceed` → should be `true` (smell findings lower score but don't
-  hard-gate). Obey regardless.
+- `proceed` → always `true` (smell findings lower score but don't hard-gate)
+
+**`smell_type` values are exactly these five snake_case strings** — match on
+them literally, they are not hyphenated:
+
+| `smell_type` | Meaning |
+|---|---|
+| `no_assertion` | test asserts nothing at all |
+| `empty_test` | body is only `pass` / `...` / a docstring |
+| `trivial_assertion` | `assert True`, `x is not None`, bare `assertTrue(x)` |
+| `duplicate_body` | structurally identical to an earlier test |
+| `sleep_call` | `time.sleep()` — a flakiness source |
 
 **Transition:** → Stage 5 (if findings exist) or Stage 6 (if clean)
 
@@ -194,10 +206,12 @@ Call: detect_smells(test_file="{test_file}")
 
 **Process:**
 1. For each finding in `details.findings[]`:
-   - If `smell_type` is `no-assertion` or `trivial-assert`:
-     rewrite the test with a meaningful behavioural assertion.
-   - If `smell_type` is `duplicate-body`: merge or differentiate.
-   - If `smell_type` is `sleep`: replace with proper mocking/async.
+   - `no_assertion` or `empty_test`: the test validates nothing — rewrite it
+     with a real behavioural assertion, or drop it.
+   - `trivial_assertion`: replace the weak check with an exact-value,
+     exception, or state-change assertion.
+   - `duplicate_body`: merge or differentiate the duplicate.
+   - `sleep_call`: replace with proper mocking/async waiting.
 2. Each rewritten test goes back through Stage 3 (`validate_and_keep`)
    as a new candidate replacing the smelly version.
 3. If the rewrite is also rejected, accept the original (it passed
@@ -217,12 +231,23 @@ Call: run_flaky_check(test_file="{test_file}", n=5)
 ```
 
 **Read from response:**
-- `details.flaky[]` → list of test names with inconsistent outcomes
-- `proceed` → if `false`, flaky tests were found and hard-discarded.
-  The tool handles removal. Do NOT re-insert them.
+- `details.flaky[]` → `[{test_id, outcomes, distinct}]` — tests whose outcome
+  vector was NOT identical across runs
+- `details.consistently_failing[]` → tests that failed in EVERY run. These are
+  **deterministically broken, NOT flaky.** Do not discard them as flaky —
+  apply the bug-vs-wrong-test judgment from Stage 9 instead.
+- `details.outcomes` → `{test_id: [outcome per run]}`, the full evidence
+- `proceed` → `false` when any test is flaky
 
-**For each flaky test:** Record it as discarded with reason "flaky"
-in the discard log.
+> **The tool does NOT remove anything.** `run_flaky_check` is a read-only
+> diagnostic: it reports outcome vectors and nothing else. Every flaky test
+> is still in the file. YOU must delete each `details.flaky[].test_id` from
+> the test file yourself before continuing — otherwise the flaky tests stay
+> in the suite and every later stage is measured against a suite that cannot
+> reproduce its own results.
+
+**For each flaky test:** remove it from the test file, then record it as
+discarded with reason "flaky" in the discard log.
 
 **Transition:** → Stage 7
 
@@ -337,15 +362,37 @@ crash from fuzzing (Stage 8) becomes a permanent, named regression test.
 kill rate — the true test-strength metric.
 
 ```
-Call: mutation_test(target_module="{source_file}")
+Call: mutation_test(
+  target_module="{source_file}",
+  cwd="{project_root}",          # REQUIRED when target_module is relative
+  tests_dir="tests"
+)
 ```
 
+> **`cwd` is required** whenever `target_module` is a relative path. Without
+> it the tool returns `ok=false` with `error: "cwd_required"` and the stage
+> produces nothing. Pass the absolute project root.
+
 **Read from response:**
-- `details.mutation_score` → 0.0–1.0 kill rate
+- `details.mutation_score` → 0.0–1.0 kill rate (killed / (killed + survived))
 - `details.killed` → count of killed mutants
-- `details.survived[]` → array of `{id, line, original, mutated}`
-- `proceed` → obey (surviving mutants lower score but don't hard-gate)
+- `details.survived[]` → array of
+  `{id, line, original, mutated, status, function}` — every mutant the suite
+  failed to kill
+- `details.not_covered` → how many survivors no test executed at all
+- `proceed` → always `true` (surviving mutants lower score but don't hard-gate)
 - `score` → mutation quality contribution
+
+**`status` on each survivor tells you WHICH FIX to apply — read it before
+writing anything:**
+
+| `status` | What it means | The fix |
+|---|---|---|
+| `survived` | a test ran that line and did not notice the change | the assertion is too weak — **strengthen it** |
+| `no tests` | no test executed the line at all | **write a new test**; a better assertion cannot help |
+
+Survivors past the first 100 carry `detail_omitted: true` and have empty
+`original`/`mutated`; `details.detail_omitted_count` reports how many.
 
 **If `details.mutation_score >= mutation_target`:** → Stage 12 (check
 coverage loop).

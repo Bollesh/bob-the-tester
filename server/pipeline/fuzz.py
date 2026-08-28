@@ -10,10 +10,18 @@ only executes it and reports crashes.  P2 never generates harness code.
 
 Details payload (AGENTS.md §5):
     crashes         list — [{input_repr, input_file, exception, stack_top}]
+    input_file      str  — ABSOLUTE path to the crashing input, which still
+                           exists after this call returns.  Crashes are
+                           written to <cwd>/fuzz_crashes/ (gitignored) rather
+                           than a temp directory, because Bob has to read the
+                           input to write the regression test.  Only files
+                           produced by THIS run are reported.
     execs_per_sec   int  — throughput reported by libFuzzer (0 if unknown)
     seconds         int  — time budget actually requested
     engine_available bool— False when Atheris is not installed
     total_execs     int  — units executed, when libFuzzer reported it
+
+`artifacts` carries the same crash paths, per the ToolResult contract.
 
 Gate policy (AGENTS.md §3 and server/main.py): proceed is ALWAYS True.  A
 crash is a FINDING — Bob converts it into a named regression test, which
@@ -34,7 +42,6 @@ import importlib.util
 import re
 import subprocess
 import sys
-import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -48,6 +55,11 @@ _TIMEOUT_GRACE_S = 30
 
 _MIN_SECONDS = 1
 _MAX_SECONDS = 3600
+
+# Directory (under the harness cwd) where crashing inputs are kept.  These
+# must outlive the call so Bob can read them when writing the regression
+# test; .gitignore excludes it.
+_CRASH_DIRNAME = "fuzz_crashes"
 
 # How many bytes of a crashing input to inline in the result.  Full inputs
 # stay on disk and are referenced by input_file.
@@ -185,115 +197,142 @@ def run_fuzz(
     cwd = str(Path(cwd).resolve()) if cwd else str(harness.parent)
 
     # ── Run under a time budget ───────────────────────────────────────────
-    # artifact_prefix keeps crash-* files out of the repo; libFuzzer requires
-    # the trailing separator.
-    with tempfile.TemporaryDirectory(prefix="bob_fuzz_") as artifact_dir:
-        prefix = artifact_dir.rstrip("/") + "/"
+    # Crash inputs are written to <cwd>/fuzz_crashes/ rather than a temp dir
+    # that vanishes when this function returns: a crashing input is the whole
+    # point of the stage, and Bob must be able to open it to write the
+    # regression test.  The directory is gitignored.
+    crash_dir = Path(cwd) / _CRASH_DIRNAME
+    try:
+        crash_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return _unavailable(
+            f"Could not create the crash output directory {crash_dir}: {exc}",
+            str(exc),
+        )
 
-        try:
-            proc = subprocess.run(
-                [
-                    sys.executable,
-                    str(harness),
-                    f"-max_total_time={seconds}",
-                    f"-artifact_prefix={prefix}",
-                    "-print_final_stats=1",
-                ],
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=seconds + _TIMEOUT_GRACE_S,
-            )
-            output = (proc.stdout or "") + "\n" + (proc.stderr or "")
-            return_code = proc.returncode
-            timed_out = False
+    # Only artifacts produced by THIS run should be reported, so record what
+    # was already there.
+    pre_existing = {p.name for p in crash_dir.glob("*")}
 
-        except subprocess.TimeoutExpired as exc:
-            # The harness ignored -max_total_time.  Whatever it printed before
-            # the kill is still worth parsing for crashes.
-            output = "".join(
-                part.decode("utf-8", "replace") if isinstance(part, bytes) else (part or "")
-                for part in (exc.stdout, exc.stderr)
-            )
-            return_code = -1
-            timed_out = True
+    artifact_dir = str(crash_dir)
+    prefix = artifact_dir.rstrip("/") + "/"  # libFuzzer needs the separator
 
-        except OSError as exc:
-            return _unavailable(f"Could not start the harness: {exc}", str(exc))
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(harness),
+                f"-max_total_time={seconds}",
+                f"-artifact_prefix={prefix}",
+                "-print_final_stats=1",
+            ],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=seconds + _TIMEOUT_GRACE_S,
+        )
+        output = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        return_code = proc.returncode
+        timed_out = False
 
-        # ── Collect crashes ───────────────────────────────────────────────
-        crashes: list[dict[str, Any]] = []
+    except subprocess.TimeoutExpired as exc:
+        # The harness ignored -max_total_time.  Whatever it printed before
+        # the kill is still worth parsing for crashes.
+        output = "".join(
+            part.decode("utf-8", "replace") if isinstance(part, bytes) else (part or "")
+            for part in (exc.stdout, exc.stderr)
+        )
+        return_code = -1
+        timed_out = True
 
-        artifact_paths = [Path(p) for p in _ARTIFACT_RE.findall(output)]
-        # libFuzzer also leaves artifacts behind without always naming them.
-        for extra in sorted(Path(artifact_dir).glob("*")):
-            if extra not in artifact_paths:
-                artifact_paths.append(extra)
+    except OSError as exc:
+        return _unavailable(f"Could not start the harness: {exc}", str(exc))
 
-        exception = _extract_exception(output)
-        stack_top = _extract_stack_top(output)
-        crashed = "Uncaught Python exception" in output or bool(artifact_paths)
+    # ── Collect crashes ───────────────────────────────────────────────
+    crashes: list[dict[str, Any]] = []
 
-        if artifact_paths:
-            for art in artifact_paths:
-                crashes.append({
-                    "input_repr": _read_input_preview(art),
-                    "input_file": art.name,
-                    "exception": exception,
-                    "stack_top": stack_top,
-                })
-        elif crashed:
-            # Crash reported but no artifact written (e.g. -runs mode).
+    artifact_paths = [Path(p) for p in _ARTIFACT_RE.findall(output)]
+    # libFuzzer also leaves artifacts behind without always naming them.
+    # Skip anything that predates this run so an old crash is not re-reported.
+    for extra in sorted(crash_dir.glob("*")):
+        if extra.name not in pre_existing and extra not in artifact_paths:
+            artifact_paths.append(extra)
+
+    exception = _extract_exception(output)
+    stack_top = _extract_stack_top(output)
+
+    # A non-zero exit is itself a crash signal: libFuzzer can abort without
+    # printing the Python exception banner (a native crash, or an abort
+    # inside the harness), and relying on the string alone missed those.
+    # timed_out sets return_code to -1 artificially, so exclude that case.
+    crashed = (
+        "Uncaught Python exception" in output
+        or bool(artifact_paths)
+        or (not timed_out and return_code not in (0, None))
+    )
+
+    if artifact_paths:
+        for art in artifact_paths:
             crashes.append({
-                "input_repr": None,
-                "input_file": None,
+                "input_repr": _read_input_preview(art),
+                # Absolute path to a file that still exists after this call —
+                # Bob needs to read it to write the regression test.
+                "input_file": str(art.resolve()),
                 "exception": exception,
                 "stack_top": stack_top,
             })
+    elif crashed:
+        # Crash reported but no artifact written (e.g. -runs mode).
+        crashes.append({
+            "input_repr": None,
+            "input_file": None,
+            "exception": exception,
+            "stack_top": stack_top,
+        })
 
-        execs_per_sec = _last_int(_EXEC_PER_SEC_RE, output)
-        total_execs = _last_int(_TOTAL_EXECS_RE, output)
+    execs_per_sec = _last_int(_EXEC_PER_SEC_RE, output)
+    total_execs = _last_int(_TOTAL_EXECS_RE, output)
 
-        # ── Score and verdict ─────────────────────────────────────────────
-        # No crash in the budget is the good outcome and scores 1.0; each
-        # crash is a real finding that lowers the stage score.
-        score = 0.0 if crashes else 1.0
+    # ── Score and verdict ─────────────────────────────────────────────
+    # No crash in the budget is the good outcome and scores 1.0; each
+    # crash is a real finding that lowers the stage score.
+    score = 0.0 if crashes else 1.0
 
-        if crashes:
-            verdict = (
-                f"{len(crashes)} crash(es) found in {seconds}s "
-                f"({execs_per_sec} exec/s): {exception} "
-                f"— convert each into a named regression test"
-            )
-        elif timed_out:
-            verdict = (
-                f"Harness did not honour -max_total_time and was killed after "
-                f"{seconds + _TIMEOUT_GRACE_S}s; no crashes seen. "
-                f"Check that the harness calls atheris.Fuzz()."
-            )
-        else:
-            verdict = (
-                f"No crashes in {seconds}s "
-                f"({total_execs or 'unknown'} execs, {execs_per_sec} exec/s)"
-            )
-
-        return ToolResult(
-            tool="run_fuzz",
-            ok=True,
-            score=score,
-            proceed=True,      # crashes are findings — AGENTS.md §3
-            verdict=verdict,
-            details={
-                "crashes": crashes,
-                "execs_per_sec": execs_per_sec,
-                "total_execs": total_execs,
-                "seconds": seconds,
-                "engine_available": True,
-                "return_code": return_code,
-                "timed_out": timed_out,
-                "stdout_tail": "\n".join(output.splitlines()[-40:]),
-            },
-            artifacts=[],   # crash files live in a temp dir that is now gone
-            duration_ms=_elapsed_ms(),
-            run_id=run_id,
+    if crashes:
+        verdict = (
+            f"{len(crashes)} crash(es) found in {seconds}s "
+            f"({execs_per_sec} exec/s): {exception} "
+            f"— convert each into a named regression test"
         )
+    elif timed_out:
+        verdict = (
+            f"Harness did not honour -max_total_time and was killed after "
+            f"{seconds + _TIMEOUT_GRACE_S}s; no crashes seen. "
+            f"Check that the harness calls atheris.Fuzz()."
+        )
+    else:
+        verdict = (
+            f"No crashes in {seconds}s "
+            f"({total_execs or 'unknown'} execs, {execs_per_sec} exec/s)"
+        )
+
+    return ToolResult(
+        tool="run_fuzz",
+        ok=True,
+        score=score,
+        proceed=True,      # crashes are findings — AGENTS.md §3
+        verdict=verdict,
+        details={
+            "crashes": crashes,
+            "execs_per_sec": execs_per_sec,
+            "total_execs": total_execs,
+            "seconds": seconds,
+            "engine_available": True,
+            "return_code": return_code,
+            "timed_out": timed_out,
+            "stdout_tail": "\n".join(output.splitlines()[-40:]),
+        },
+        artifacts=[c["input_file"] for c in crashes if c["input_file"]],
+        duration_ms=_elapsed_ms(),
+        run_id=run_id,
+    )

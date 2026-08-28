@@ -33,9 +33,12 @@ from __future__ import annotations
 import ast
 import time
 import uuid
-from typing import Any
+from typing import Any, NamedTuple, TypeGuard, Union
 
 from server.schema import ToolResult
+
+# Both sync and async test definitions are analysed identically.
+_TestFunc = Union[ast.FunctionDef, ast.AsyncFunctionDef]
 
 # Weight each smell contributes to the penalty.  Tuned so that a test with
 # no assertion at all costs roughly twice what a weak assertion costs.
@@ -62,7 +65,7 @@ _ASSERT_CALL_PREFIXES = ("assert", "assert_")
 # AST helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _is_test_function(node: ast.AST) -> bool:
+def _is_test_function(node: ast.AST) -> TypeGuard[_TestFunc]:
     """True for `def test_*` / `async def test_*` function definitions."""
     return (
         isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -70,20 +73,25 @@ def _is_test_function(node: ast.AST) -> bool:
     )
 
 
-def _collect_test_functions(tree: ast.Module) -> list[ast.FunctionDef]:
+def _collect_test_functions(tree: ast.Module) -> list[_TestFunc]:
     """
-    Return every test function in the module, including methods inside
-    `class Test…` containers.  Order follows source order.
+    Return every test function in the module, including methods inside class
+    containers (unittest.TestCase subclasses included).  Order follows source
+    order.
+
+    The return type covers both sync and async definitions — annotating it
+    as list[ast.FunctionDef] was a lie that needed a `type: ignore` at every
+    append.
     """
-    found: list[ast.FunctionDef] = []
+    found: list[_TestFunc] = []
 
     for node in tree.body:
         if _is_test_function(node):
-            found.append(node)  # type: ignore[arg-type]
+            found.append(node)
         elif isinstance(node, ast.ClassDef):
             for sub in node.body:
                 if _is_test_function(sub):
-                    found.append(sub)  # type: ignore[arg-type]
+                    found.append(sub)
 
     return found
 
@@ -143,35 +151,57 @@ def _dotted_name(node: ast.AST) -> str:
     return ".".join(reversed(parts))
 
 
-def _has_assertion(fn: ast.FunctionDef) -> bool:
+class _Scan(NamedTuple):
+    """Everything one AST traversal of a test function needs to yield."""
+
+    has_assertion: bool
+    # (smell_type, lineno) for each trivial assertion / sleep occurrence
+    occurrences: list[tuple[str, int]]
+
+
+def _scan_function(fn: _TestFunc) -> _Scan:
     """
-    True when the test contains any real assertion:
-        - an `assert` statement
-        - a call to assert*/assert_* (unittest or helper style)
-        - a `with pytest.raises(...)` / `pytest.warns(...)` block, which is
-          itself an assertion about behaviour
+    Walk a test function ONCE and collect every signal the checks need.
+
+    Detects, in a single pass:
+        - whether the test asserts anything at all (an `assert` statement, an
+          assert*/assert_* call, or a pytest.raises/warns context, which is
+          itself an assertion about behaviour)
+        - each trivial assertion, statement or unittest-call form
+        - each time.sleep() call
     """
+    has_assertion = False
+    occurrences: list[tuple[str, int]] = []
+
     for node in ast.walk(fn):
         if isinstance(node, ast.Assert):
-            return True
+            has_assertion = True
+            if _is_trivial_assert_stmt(node):
+                occurrences.append(("trivial_assertion", node.lineno))
 
-        if isinstance(node, ast.Call):
+        elif isinstance(node, ast.Call):
             name = _call_name(node)
-            if name.startswith(_ASSERT_CALL_PREFIXES):
-                return True
             dotted = _dotted_name(node.func)
-            if dotted.endswith(("pytest.raises", "pytest.warns", "pytest.fail")):
-                return True
 
-        # `with pytest.raises(ValueError):`
-        if isinstance(node, (ast.With, ast.AsyncWith)):
+            if name.startswith(_ASSERT_CALL_PREFIXES) or dotted.endswith(
+                ("pytest.raises", "pytest.warns", "pytest.fail")
+            ):
+                has_assertion = True
+
+            if _is_trivial_assert_call(node):
+                occurrences.append(("trivial_assertion", node.lineno))
+            elif _is_sleep_call(node):
+                occurrences.append(("sleep_call", node.lineno))
+
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            # `with pytest.raises(ValueError):`
             for item in node.items:
                 if isinstance(item.context_expr, ast.Call):
-                    dotted = _dotted_name(item.context_expr.func)
-                    if dotted.endswith(("raises", "warns")):
-                        return True
+                    ctx = _dotted_name(item.context_expr.func)
+                    if ctx.endswith(("raises", "warns")):
+                        has_assertion = True
 
-    return False
+    return _Scan(has_assertion=has_assertion, occurrences=occurrences)
 
 
 def _is_trivial_assert_stmt(node: ast.Assert) -> bool:
@@ -235,7 +265,7 @@ def _is_sleep_call(node: ast.Call) -> bool:
     return dotted == "time.sleep" or dotted.endswith(".sleep") or dotted == "sleep"
 
 
-def _body_fingerprint(fn: ast.FunctionDef) -> str:
+def _body_fingerprint(fn: _TestFunc) -> str:
     """
     Structural fingerprint of a test body, ignoring the docstring.
 
@@ -327,6 +357,11 @@ def detect_smells(
     fingerprints: dict[str, str] = {}   # fingerprint → first test that had it
 
     for fn in tests:
+        # ONE traversal per test function.  Previously _has_assertion() walked
+        # the tree and then the loop below walked it again, doubling the work
+        # on every file.
+        scan = _scan_function(fn)
+
         # Empty body takes precedence over "no assertion" — it is the more
         # specific diagnosis and reporting both would double-count.
         if _is_body_effectively_empty(fn.body):
@@ -336,7 +371,7 @@ def detect_smells(
                 "line": fn.lineno,
                 "snippet": _snippet(fn.lineno),
             })
-        elif not _has_assertion(fn):
+        elif not scan.has_assertion:
             findings.append({
                 "test_name": fn.name,
                 "smell_type": "no_assertion",
@@ -344,30 +379,15 @@ def detect_smells(
                 "snippet": _snippet(fn.lineno),
             })
 
-        # Trivial assertions and sleeps are reported per occurrence.
-        for node in ast.walk(fn):
-            if isinstance(node, ast.Assert) and _is_trivial_assert_stmt(node):
-                findings.append({
-                    "test_name": fn.name,
-                    "smell_type": "trivial_assertion",
-                    "line": node.lineno,
-                    "snippet": _snippet(node.lineno),
-                })
-            elif isinstance(node, ast.Call):
-                if _is_trivial_assert_call(node):
-                    findings.append({
-                        "test_name": fn.name,
-                        "smell_type": "trivial_assertion",
-                        "line": node.lineno,
-                        "snippet": _snippet(node.lineno),
-                    })
-                elif _is_sleep_call(node):
-                    findings.append({
-                        "test_name": fn.name,
-                        "smell_type": "sleep_call",
-                        "line": node.lineno,
-                        "snippet": _snippet(node.lineno),
-                    })
+        # Trivial assertions and sleeps are reported per occurrence, in source
+        # order so findings read top-to-bottom.
+        for smell_type, lineno in sorted(scan.occurrences, key=lambda o: o[1]):
+            findings.append({
+                "test_name": fn.name,
+                "smell_type": smell_type,
+                "line": lineno,
+                "snippet": _snippet(lineno),
+            })
 
         # Duplicate bodies — report the second and later occurrences only,
         # naming the original in the snippet so Bob knows what it duplicates.
