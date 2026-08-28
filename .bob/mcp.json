@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "testforge": {
+      "command": "python",
+      "args": ["server/main.py"],
+      "env": {
+        "PYTHONPATH": ".",
+        "TESTFORGE_REPLAY": "${TESTFORGE_REPLAY:-0}"
+      }
+    },
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp@^2.2.0"],
+      "env": {
+        "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}"
+      }
+    }
+  }
+}
