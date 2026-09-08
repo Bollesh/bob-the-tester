@@ -705,6 +705,10 @@ from server.data import db as p4_db                      # noqa: E402
 from server.data.logging_mw import log_tool_call         # noqa: E402
 from server.data.models import SCHEMA_VERSION            # noqa: E402
 from server.data import replay as p4_replay              # noqa: E402
+from server.data.runs import (                            # noqa: E402
+    finish_run as finish_run_tool,
+    start_run as start_run_tool,
+)
 from server.gaps import (                                # noqa: E402
     explain_gaps,
     save_test_record,
@@ -984,6 +988,69 @@ wrong = save_test_record(
 check("wrong-test path records a discard and no bug",
       wrong.ok and wrong.details.get("bug_recorded") is False
       and len(p4_db.bugs_for_run(P4_RUN)) == 1)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check 18: start_run / finish_run — the run lifecycle Bob drives
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("18 - start_run / finish_run: a run that closes itself")
+
+LIFE_RUN = "smoke-life-0001"
+
+opened = start_run_tool(run_id=LIFE_RUN, source_file="sample_repo/src/calculator.py",
+                        coverage_target=0.85, mutation_target=0.80, max_iterations=3)
+life_row = p4_db.get_run(LIFE_RUN)
+check("start_run opens the run", opened.ok and opened.proceed
+      and life_row is not None and life_row["status"] == "running")
+check("start_run returns the run_id to thread through the pipeline",
+      opened.details.get("run_id") == LIFE_RUN and opened.run_id == LIFE_RUN)
+
+# Fraction in, percent out for coverage; fraction stays a fraction for
+# mutation — the units the coverage and mutation tools actually report.
+check("targets normalise to the units the dashboard reads",
+      life_row["coverage_target"] == 85.0 and life_row["mutation_target"] == 0.8,
+      f"got {life_row['coverage_target']} / {life_row['mutation_target']}")
+
+pct_form = start_run_tool(run_id="smoke-life-pct", coverage_target=85, mutation_target=80)
+pct_row = p4_db.get_run("smoke-life-pct")
+check("percent-form targets normalise identically",
+      pct_form.ok and pct_row["coverage_target"] == 85.0
+      and pct_row["mutation_target"] == 0.8)
+
+closed = finish_run_tool(LIFE_RUN, status="complete", iterations_used=2,
+                         notes="targets met on iteration 2")
+life_row = p4_db.get_run(LIFE_RUN)
+check("finish_run closes the run",
+      closed.ok and life_row["status"] == "complete"
+      and life_row["finished_at"] is not None and life_row["iterations_used"] == 2)
+check("finish_run reports the run duration", closed.details.get("duration_ms") is not None)
+check("finish_run keeps proceed true even so", closed.proceed)
+
+orphan = finish_run_tool("smoke-life-orphan", status="aborted")
+check("a run nobody opened is backfilled and closed, not refused",
+      orphan.ok and orphan.details.get("run_existed") is False
+      and p4_db.get_run("smoke-life-orphan")["status"] == "aborted")
+
+no_id = finish_run_tool("")
+check("finish_run without a run_id fails loudly but never gates",
+      no_id.ok is False and no_id.proceed is True)
+
+# The lifecycle tools must never be served from the replay snapshot: a
+# cached "run closed" would leave the run open in the database forever.
+os.environ["BOB_THE_TESTER_REPLAY"] = "1"
+try:
+    replay_res, was_replayed = p4_replay.replay_or_run(
+        "finish_run", {"run_id": "smoke-life-replay"},
+        lambda: finish_run_tool("smoke-life-replay", status="complete"),
+    )
+    check("finish_run runs for real even in replay mode",
+          was_replayed is False
+          and p4_db.get_run("smoke-life-replay")["status"] == "complete")
+    check("lifecycle calls are not written into the replay snapshot",
+          not any(f.name.startswith(("finish_run__", "start_run__"))
+                  for f in p4_replay.cache_dir().glob("*.json")))
+finally:
+    os.environ["BOB_THE_TESTER_REPLAY"] = "0"
 
 # ── Clean up P4 fixtures ─────────────────────────────────────────────────────
 for _var in ("BOB_THE_TESTER_DB", "BOB_THE_TESTER_REPLAY_DIR", "BOB_THE_TESTER_REPLAY"):

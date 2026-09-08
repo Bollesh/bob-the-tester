@@ -54,6 +54,17 @@ DEFAULT_CACHE_DIR = REPO_ROOT / "demo_replay"
 # Arguments that must never contribute to the cache key.
 _VOLATILE_ARGS = {"run_id", "run_start_ms"}
 
+# Tools that are never cached, in either direction.
+#
+# These do no work worth replaying — no subprocess, no model, microseconds
+# each.  What they DO is write to the database, and a cache hit returns the
+# recorded result without performing that write.  Replaying finish_run in
+# particular would hand back "run closed" while leaving the run open
+# forever: the demo would look right and the dashboard would be wrong.
+_NEVER_REPLAY = {
+    "start_run", "finish_run", "store_explanation", "save_test_record",
+}
+
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
@@ -205,7 +216,7 @@ def replay_or_run(
     tool's real measured cost, and the replayed=1 flag already tells the
     dashboard the wall clock was not spent again.
     """
-    if replay_enabled():
+    if replay_enabled() and tool not in _NEVER_REPLAY:
         cached = load(tool, arguments)
         if cached is not None:
             current_run = arguments.get("run_id") or cached.run_id
@@ -220,7 +231,7 @@ def replay_or_run(
 
     result = fn()
 
-    if recording_enabled() and result.ok:
+    if recording_enabled() and result.ok and tool not in _NEVER_REPLAY:
         record(tool, arguments, result)
 
     return result, False

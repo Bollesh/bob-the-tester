@@ -49,6 +49,12 @@
 
   /*
    * Poll the fingerprint of the database contents; reload when it moves.
+   *
+   * The badge this updates describes the PAGE, not the pipeline: "static
+   * page" (opened from disk, never changes), "auto-refresh" (served, will
+   * reload itself when the database moves), "server unreachable" (the
+   * dashboard server went away).  Whether a run is actually in progress is
+   * the Status tile's job, and it answers from the database.
    * The fingerprint is cheap to compute (row counts + last timestamps), so
    * polling never competes with a pipeline run for the database.
    */
@@ -63,11 +69,11 @@
         .then(function (r) { return r.ok ? r.json() : null; })
         .then(function (data) {
           if (!data) return;
-          if (badge) badge.textContent = "live";
+          if (badge) badge.textContent = "auto-refresh";
           if (current && data.fingerprint !== current) window.location.reload();
         })
         .catch(function () {
-          if (badge) badge.textContent = "offline";
+          if (badge) badge.textContent = "server unreachable";
         });
     }, 4000);
   }

@@ -161,15 +161,25 @@ main { max-width: 1240px; margin: 0 auto; padding: 20px; }
   font-size: 20px;
   font-weight: 650;
   letter-spacing: -.02em;
-  overflow-wrap: anywhere;
+  /* break-word, not anywhere: a value should only ever split when it
+     genuinely cannot fit, never mid-word to save a few pixels. */
+  overflow-wrap: break-word;
 }
 .metric .delta { font-size: 12px; font-weight: 600; }
 .delta.up   { color: var(--ok); }
 .delta.down { color: var(--bad); }
 .delta.flat { color: var(--muted); }
 
-/* The KPI strip at the top of a run reuses .metric on a card of its own. */
+/* The KPI strip at the top of a run reuses .metric on a card of its own.
+   Fixed 4×2 rather than auto-fit: auto-fit sizes columns to the narrowest
+   tile and then strands the last one on a row of its own, and these eight
+   values (one of which can be a word like "incomplete") need the room. */
 .kpis { margin-bottom: 16px; }
+.kpis .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+@media (max-width: 760px) {
+  .kpis .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 
 /* ── Notes ───────────────────────────────────────────────────────────── */
 

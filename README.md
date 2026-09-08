@@ -41,10 +41,11 @@ Every MCP tool returns the same JSON shape. Bob never parses free text; all sequ
 
 ### Registered tools
 
-Nine tools are live on the server today. Optional engines degrade rather than break: a missing Hypothesis, Atheris, or mutmut returns `ok: false` with `proceed: true` and `engine_available: false`, so the rest of the pipeline still runs.
+Fourteen tools are live on the server today. Optional engines degrade rather than break: a missing Hypothesis, Atheris, or mutmut returns `ok: false` with `proceed: true` and `engine_available: false`, so the rest of the pipeline still runs.
 
 | Tool | Gates? | Key `details` |
 | --- | --- | --- |
+| `start_run` | — | `run_id` to thread through the run, normalised targets |
 | `run_tests` | ✅ fails/errors | `passed`, `failed`, `errors`, `junit_summary` |
 | `get_coverage` | — | `percent`, `covered_lines`, `uncovered_ranges` |
 | `list_uncovered` | — | `gaps[]` with enclosing function names |
@@ -54,10 +55,14 @@ Nine tools are live on the server today. Optional engines degrade rather than br
 | `run_property_tests` | — | `failures[]` with shrunk counterexamples |
 | `run_fuzz` | — | `crashes[]` with readable input paths |
 | `mutation_test` | — | `mutation_score`, `survived[]` with `status` |
+| `explain_gaps` | — | `gaps[]` with source snippets and objective `signals` |
+| `store_explanation` | — | Bob's gap narration, persisted for the dashboard |
+| `save_test_record` | — | `bug_recorded` — the defect-vs-wrong-test decision |
+| `finish_run` | — | `closed`, `duration_ms`, final `status` |
 
 `run_flaky_check` **reports** flaky tests; it does not delete them. Removing them is a skill step.
 
-Not yet registered (P4): `explain_gaps`, `store_explanation`, `save_test_record`. Calling them returns "Unknown tool".
+A run is opened by `start_run` and closed by `finish_run` — Bob calls both, and threads the returned `run_id` through every call in between. Nothing else closes a run, so an unclosed run shows on the dashboard as `incomplete` rather than silently claiming to still be in progress.
 
 ## Repository layout
 

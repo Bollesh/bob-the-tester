@@ -60,6 +60,11 @@ _WRAPPING = {
 # Distinct hues for chart series; the dashboard never plots more than four.
 _PALETTE = ["#3b6fd4", "#e0a84a", "#1f8a4c", "#c0392b"]
 
+# How long a run may sit open with no tool call before the page stops
+# calling it "running".  Generous on purpose: a mutation stage on a large
+# module can genuinely go quiet for several minutes.
+STALE_AFTER_MS = 15 * 60 * 1000
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Primitives
@@ -363,8 +368,21 @@ def mutation_panel(rows: list[dict[str, Any]], run: dict[str, Any]) -> str:
         ))
 
     survivors = last.get("survivors") or []
-    if not survivors:
+    survived_count = int(last.get("survived_count") or 0)
+
+    if not survived_count:
         body += note("ok", "No surviving mutants — every mutation was caught.")
+        return card("Mutation score", body, sub)
+
+    if not survivors:
+        # The count and the per-mutant list come from different parts of the
+        # mutmut output; trusting the empty list over a non-zero count would
+        # announce a clean sweep that did not happen.
+        body += note("warn", (
+            f"<b>{survived_count} surviving mutant(s)</b>, but the per-mutant "
+            "detail is missing from this run — mutmut reported a count without "
+            "a listing."
+        ))
         return card("Mutation score", body, sub)
 
     # `status` separates the two fixes: a weak assertion versus no test at
@@ -754,10 +772,68 @@ def _asset(name: str) -> str:
         return ""
 
 
-def run_label(run: dict[str, Any]) -> str:
+def derive_status(run: dict[str, Any], calls: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    What to call this run, from the evidence rather than from the row alone.
+
+    `runs.status` is only ever moved off 'running' by finish_run.  A run
+    whose process died — a crashed session, a Ctrl-C, a pipeline that
+    simply never called finish_run — therefore keeps claiming to be in
+    progress for as long as the database exists.  Reporting that verbatim
+    is how a dashboard ends up describing an August run as live in
+    September.
+
+    So: finished runs report what they were closed as; an open run with
+    recent tool activity is genuinely running; an open run that has been
+    silent past STALE_AFTER_MS is `incomplete`, and says why.
+    """
+    started = run.get("started_at") or 0
+    finished = run.get("finished_at")
+    last_activity = max([c.get("created_at") or 0 for c in calls] + [started])
+
+    if finished:
+        status = run.get("status") or "complete"
+        kind = {"complete": "ok", "failed": "bad"}.get(status, "warn")
+        return {
+            "label": status,
+            "kind": kind,
+            "incomplete": False,
+            "duration_ms": finished - started if started else None,
+            "duration_label": "Duration",
+            "last_activity": last_activity,
+        }
+
+    age = now_ms() - last_activity
+    if age > STALE_AFTER_MS:
+        return {
+            "label": "incomplete",
+            "kind": "warn",
+            "incomplete": True,
+            # Everything after the last tool call is unaccounted for, so the
+            # honest span is start → last activity, not start → now.
+            "duration_ms": last_activity - started if started else None,
+            "duration_label": "Ran for",
+            "last_activity": last_activity,
+        }
+
+    return {
+        "label": run.get("status") or "running",
+        "kind": "info",
+        "incomplete": False,
+        "duration_ms": None,
+        "duration_label": "Duration",
+        "last_activity": last_activity,
+    }
+
+
+def now_ms() -> int:
+    return int(datetime.now().timestamp() * 1000)
+
+
+def run_label(run: dict[str, Any], status: Mapping[str, Any] | None = None) -> str:
     source = run.get("source_file") or "(no source recorded)"
-    return (f"{fmt_time(run['started_at'])} · {Path(source).name} · "
-            f"{run.get('status', '?')}")
+    label = status["label"] if status else (run.get("status") or "?")
+    return f"{fmt_time(run['started_at'])} · {Path(source).name} · {label}"
 
 
 def kpi_strip(bundle: dict[str, Any]) -> str:
@@ -768,10 +844,11 @@ def kpi_strip(bundle: dict[str, Any]) -> str:
     calls = bundle["calls"]
     tests = bundle["tests"]
 
-    status = run.get("status", "?")
+    status = derive_status(run, calls)
+    status_delta = "never finished" if status["incomplete"] else ""
     duration = (
-        fmt_duration(run["finished_at"] - run["started_at"])
-        if run.get("finished_at") and run.get("started_at") else "running…"
+        fmt_duration(status["duration_ms"])
+        if status["duration_ms"] is not None else "running…"
     )
 
     if coverage:
@@ -794,8 +871,10 @@ def kpi_strip(bundle: dict[str, Any]) -> str:
         mut = metric("Mutation", "—")
 
     return '<div class="card kpis">' + metrics(
-        metric("Status", status),
-        metric("Duration", duration),
+        metric("Status", status["label"], status_delta,
+               "down" if status["incomplete"] else "flat"),
+        metric(status["duration_label"], duration,
+               "to last tool call" if status["incomplete"] else "", "flat"),
         cov,
         mut,
         metric("Tests kept", f"{sum(1 for t in tests if t['kept'])}/{len(tests)}"),
@@ -806,7 +885,14 @@ def kpi_strip(bundle: dict[str, Any]) -> str:
         f'<p class="filename">run_id {esc(run["run_id"])} · source '
         f'{esc(run.get("source_file") or "—")} · started {fmt_time(run["started_at"])}'
         f' · finished {fmt_time(run.get("finished_at"))}</p>'
-    ) + (note("info", "This run was recorded in <b>replay mode</b> — tool results "
+    ) + (note("warn", (
+        "<b>This run was never closed.</b> Nothing has happened since "
+        f"{fmt_time(status['last_activity'])}, and no <code>finish_run</code> "
+        "call ever stamped a result — the process almost certainly exited "
+        "early. The numbers below are whatever the run had reached by then, "
+        "not a finished result."
+    )) if status["incomplete"] else "") + (
+        note("info", "This run was recorded in <b>replay mode</b> — tool results "
                       "came from the cached snapshot.")
          if run.get("replay_mode") else "") + (
         note("info", esc(run["notes"])) if run.get("notes") else ""
@@ -870,7 +956,10 @@ def page(bundles: list[dict[str, Any]], snapshot: Mapping[str, Any],
          fingerprint: str = "", generated_at: str = "") -> str:
     """The whole report: every run in the page, one shown at a time."""
     options = "".join(
-        f'<option value="{esc(b["run"]["run_id"])}">{esc(run_label(b["run"]))}</option>'
+        '<option value="{id}">{label}</option>'.format(
+            id=esc(b["run"]["run_id"]),
+            label=esc(run_label(b["run"], derive_status(b["run"], b["calls"]))),
+        )
         for b in bundles
     )
     replay_badge = (
@@ -881,7 +970,8 @@ def page(bundles: list[dict[str, Any]], snapshot: Mapping[str, Any],
     topbar = (
         f'<label class="badge" for="run-picker">Run</label>'
         f'<select id="run-picker">{options}</select>'
-        f'<span class="badge" id="live-badge">static</span>'
+        '<span class="badge" id="live-badge" title="How this page updates — '
+        'it says nothing about whether a run is in progress.">static page</span>'
         f"{replay_badge}"
     )
     inner = "".join(run_section(b, hidden=i > 0) for i, b in enumerate(bundles))

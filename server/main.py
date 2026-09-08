@@ -46,6 +46,7 @@ from server.pipeline.smells import detect_smells
 # ── P4 data imports ─────────────────────────────────────────────────────────
 from server.data.logging_mw import log_tool_call
 from server.data.replay import replay_enabled, replay_or_run
+from server.data.runs import finish_run, start_run
 from server.gaps import explain_gaps, save_test_record, store_explanation
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr,
@@ -472,6 +473,54 @@ async def list_tools() -> list[Tool]:
         # ════════════════════════════════════════════════════════════════
 
         Tool(
+            name="start_run",
+            description=(
+                "Open a run and record its targets.  Call this ONCE at stage 0, "
+                "before any other tool, and pass the run_id it returns to every "
+                "later call.\n\n"
+                "Without it a run row is backfilled with no targets and no start "
+                "time of its own, and the dashboard has nothing to compare the "
+                "final numbers against.\n\n"
+                "Targets may be given as fractions (0.85) or percents (85) - both "
+                "are normalised.\n\n"
+                "Decision fields in details:\n"
+                "  run_id   - USE THIS for every subsequent tool call\n"
+                "  stored   - false means the database write failed; the pipeline\n"
+                "             still runs, it just will not be on the dashboard\n\n"
+                "proceed is always true."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": (
+                            "Optional. Omit to have one generated, or pass your own "
+                            "to resume/re-enter an existing run."
+                        ),
+                    },
+                    "source_file": {
+                        "type": "string",
+                        "description": "The module this run is covering.",
+                    },
+                    "coverage_target": {
+                        "type": "number",
+                        "description": "Line-coverage target, e.g. 0.85 or 85.",
+                    },
+                    "mutation_target": {
+                        "type": "number",
+                        "description": "Mutation-score target, e.g. 0.80 or 80.",
+                    },
+                    "max_iterations": {
+                        "type": "integer",
+                        "description": "The hard iteration cap you are working to.",
+                    },
+                },
+                "required": [],
+            },
+        ),
+
+        Tool(
             name="explain_gaps",
             description=(
                 "Return structured data about every region of a source file that the "
@@ -613,6 +662,51 @@ async def list_tools() -> list[Tool]:
                 "required": ["test_name"],
             },
         ),
+
+        Tool(
+            name="finish_run",
+            description=(
+                "Close the run: stamp the finish time, the final status, and how "
+                "many iterations were used.\n\n"
+                "Call this ONCE, LAST, on EVERY exit path - including the unhappy "
+                "ones.  A run you leave open keeps reporting itself as still in "
+                "progress on the dashboard long after the session ended, which is "
+                "worse than reporting a failure.\n\n"
+                "status: 'complete' when the pipeline reached stage 13, 'failed' "
+                "when a tool broke it, 'aborted' when you stopped early (iteration "
+                "cap, user interrupt).\n\n"
+                "Decision fields in details:\n"
+                "  closed        - false means the write failed; say so in the report\n"
+                "  duration_ms   - wall-clock length of the whole run\n"
+                "  run_existed   - false means start_run was never called\n\n"
+                "proceed is always true."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "The run_id start_run returned. Required.",
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "complete | failed | aborted.",
+                    },
+                    "iterations_used": {
+                        "type": "integer",
+                        "description": "Outer coverage-loop iterations actually used.",
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": (
+                            "One line for the dashboard: why the run ended the way "
+                            "it did."
+                        ),
+                    },
+                },
+                "required": ["run_id"],
+            },
+        ),
     ]
 
 
@@ -703,6 +797,23 @@ def _dispatch(name: str, arguments: dict) -> ToolResult:
         )
 
     # ── P4 data tools ─────────────────────────────────────────────────
+    elif name == "start_run":
+        result = start_run(
+            run_id=arguments.get("run_id", ""),
+            source_file=arguments.get("source_file", ""),
+            coverage_target=arguments.get("coverage_target"),
+            mutation_target=arguments.get("mutation_target"),
+            max_iterations=arguments.get("max_iterations"),
+        )
+
+    elif name == "finish_run":
+        result = finish_run(
+            run_id=arguments.get("run_id", ""),
+            status=arguments.get("status", "complete"),
+            iterations_used=arguments.get("iterations_used"),
+            notes=arguments.get("notes", ""),
+        )
+
     elif name == "explain_gaps":
         result = explain_gaps(
             source_file=arguments["source_file"],
