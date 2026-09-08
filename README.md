@@ -15,7 +15,7 @@ Bob drives the loop; the MCP server owns every decision.
 3. **Generate & validate** — each candidate test goes through `validate_and_keep`, which inserts it, runs the suite, requires a strict coverage increase, and rolls back cleanly on failure.
 4. **Quality pipeline** — `detect_smells`, `run_flaky_check`, `run_property_tests` (Hypothesis), `run_fuzz` (Atheris), `mutation_test` (mutmut), sequenced by the server's `proceed` signal.
 5. **Kill the survivors** — surviving mutants come back with the real file line, the original and mutated source, and a `status` saying *which* fix applies: `survived` means a test ran the line and missed the change (strengthen the assertion), `no tests` means nothing executed it at all (write a new test).
-6. **Report** — remaining gaps are narrated from `list_uncovered`; results are destined for SQLite and a Streamlit dashboard (P4, not yet built).
+6. **Report** — remaining gaps are narrated from `list_uncovered`; results land in SQLite and are rendered as a static HTML dashboard (P4).
 
 A test that fails against a known-seeded bug is reported as a **defect found**, not discarded as a bad test — the distinction is the point of the project.
 
@@ -67,7 +67,7 @@ server/           MCP server package (STDIO transport, official `mcp` SDK)
   core/           run_tests, coverage, validate_and_keep
   pipeline/       smells, flaky, properties, fuzz, mutation
   data/           SQLite models, logging middleware, replay cache
-dashboard/        Streamlit app — coverage trend, mutation gauge, kept/discarded, bugs
+dashboard/        Static HTML report — coverage trend, mutation score, kept/discarded, bugs
 sample_repo/      Demo target with documented seeded bugs (see BUGS.md)
 scripts/          smoke.py (exercises every tool without Bob), reset_demo.py
 bob_sessions/     Exported Bob task reports — append-only evidence
@@ -102,7 +102,8 @@ The smoke script is the integration safety net — 84 checks across all nine too
 
 ```bash
 bob-the-tester-server            # run the MCP server (STDIO)
-streamlit run dashboard/app.py   # view results from the last run
+python -m dashboard.build --open # render the run report to dashboard/dist/index.html
+python -m dashboard.serve        # …or serve it with auto-refresh while a run is in progress
 python scripts/reset_demo.py     # restore sample_repo/tests to pristine state
 ```
 

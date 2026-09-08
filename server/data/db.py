@@ -12,7 +12,7 @@ Failure policy (the rule that matters during a live demo):
     effort done" and returns the ToolResult untouched.
 
 Reader functions are the dashboard's entire API.  They open the database
-READ-ONLY (SQLite `mode=ro` URI) so a Streamlit refresh can never corrupt
+READ-ONLY (SQLite `mode=ro` URI) so a dashboard refresh can never corrupt
 or lock a run that is still writing — AGENTS.md §6, "reads DB read-only".
 
 Environment:
@@ -68,7 +68,7 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     """
     Open a read-write connection with the schema applied.
 
-    WAL journalling lets the Streamlit dashboard read while a pipeline run
+    WAL journalling lets the dashboard read while a pipeline run
     is still writing — without it, a dashboard refresh mid-run would block
     the server on a locked database.
     """

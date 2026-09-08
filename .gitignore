@@ -49,3 +49,6 @@ bob-the-tester.json
 # bob_sessions/  ← append-only; commit after every meaningful session (P3)
 !demo_replay/
 !bob_sessions/
+
+# Dashboard build output (regenerate with: python -m dashboard.build)
+dashboard/dist/
