@@ -64,8 +64,10 @@ stays true and engine_available reports false — so a machine without the
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -1051,6 +1053,81 @@ try:
                   for f in p4_replay.cache_dir().glob("*.json")))
 finally:
     os.environ["BOB_THE_TESTER_REPLAY"] = "0"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check 19: usage — Bobcoin and tokens read out of Bob's ledger
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("19 - usage: Bobcoin and tokens from Bob's ledger")
+
+from server.data import usage as p4_usage                 # noqa: E402
+from server.data.models import UsageRow                   # noqa: E402
+
+# A stand-in for ~/.bob/db/bob.db, so the check never depends on the machine
+# having run Bob — and never reads the developer's real ledger.
+FAKE_BOB_DB = P4_TMP / "bob.db"
+_bob = sqlite3.connect(str(FAKE_BOB_DB))
+_bob.executescript("""
+    CREATE TABLE tasks (id TEXT PRIMARY KEY, project_id TEXT, title TEXT,
+                        costs TEXT, created_at INTEGER, updated_at INTEGER);
+""")
+_workspace = "/tmp/some/workspace"
+
+
+def _write_task(cost, tokens_in, tokens_out, updated):
+    _bob.execute("INSERT OR REPLACE INTO tasks VALUES (?,?,?,?,?,?)", (
+        "task-1", f"file:{_workspace}", "smoke",
+        json.dumps({"input": tokens_in, "output": tokens_out, "cacheRead": 10,
+                    "cacheWrite": 5, "cost": cost, "contextTokens": 4096}),
+        1000, updated,
+    ))
+    _bob.commit()
+
+
+os.environ["BOB_DB"] = str(FAKE_BOB_DB)
+
+_write_task(1.5, 1000, 100, 2000)
+snap_a = p4_usage.snapshot(_workspace)
+check("snapshot reads the task ledger",
+      snap_a is not None and snap_a["cost"] == 1.5
+      and snap_a["total_tokens"] == 1100, str(snap_a))
+
+_write_task(4.0, 3000, 250, 3000)
+snap_b = p4_usage.snapshot(_workspace)
+delta = p4_usage.subtract(snap_a, snap_b)
+check("subtract reports THIS run's spend, not the task's total",
+      delta["cost"] == 2.5 and delta["input_tokens"] == 2000
+      and delta["output_tokens"] == 150 and delta["attribution"] == "task-delta",
+      str(delta))
+
+no_baseline = p4_usage.subtract(None, snap_b)
+check("without a baseline the totals are labelled an upper bound",
+      no_baseline["cost"] == 4.0 and no_baseline["attribution"] == "task-totals")
+
+# A ledger that resets (a new task reusing the id) must not produce a
+# negative cost — the run simply spent nothing measurable.
+_write_task(0.5, 10, 1, 4000)
+clamped = p4_usage.subtract(snap_b, p4_usage.snapshot(_workspace))
+check("a ledger that moves backwards clamps at zero",
+      clamped["cost"] == 0.0 and clamped["input_tokens"] == 0, str(clamped))
+
+os.environ["BOB_DB"] = str(P4_TMP / "definitely-not-here.db")
+check("a missing ledger yields no snapshot, not an exception",
+      p4_usage.snapshot(_workspace) is None)
+
+# The lifecycle tools must persist whatever was read.
+os.environ["BOB_DB"] = str(FAKE_BOB_DB)
+USAGE_RUN = "smoke-usage-0001"
+p4_db.insert_usage(UsageRow(run_id=USAGE_RUN, cost=2.5, input_tokens=2000,
+                            output_tokens=150, total_tokens=2150,
+                            attribution="task-delta", task_id="task-1"))
+usage_rows = p4_db.usage_for_run(USAGE_RUN)
+check("usage rows round-trip through the database",
+      len(usage_rows) == 1 and usage_rows[0]["cost"] == 2.5
+      and usage_rows[0]["attribution"] == "task-delta")
+
+_bob.close()
+os.environ.pop("BOB_DB", None)
 
 # ── Clean up P4 fixtures ─────────────────────────────────────────────────────
 for _var in ("BOB_THE_TESTER_DB", "BOB_THE_TESTER_REPLAY_DIR", "BOB_THE_TESTER_REPLAY"):

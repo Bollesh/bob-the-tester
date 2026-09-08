@@ -89,6 +89,34 @@ def fmt_duration(ms: float | None) -> str:
     return f"{int(seconds // 60)}m {seconds % 60:04.1f}s"
 
 
+def fmt_tokens(n: Any) -> str:
+    """Token counts run to millions; thousands separators or it is unreadable."""
+    try:
+        return f"{int(n):,}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def fmt_coin(value: Any) -> str:
+    try:
+        return f"{float(value):.3f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def spend_of(bundle: dict[str, Any]) -> dict[str, Any] | None:
+    """
+    The run's cost row — the closing one, never the baseline.
+
+    start_run stores a 'baseline' reading so finish_run can subtract it;
+    that row is bookkeeping, not a result, and must never be shown as the
+    run's spend.
+    """
+    rows = [r for r in bundle.get("usage") or []
+            if r.get("attribution") != "baseline"]
+    return rows[-1] if rows else None
+
+
 def card(title: str, body: str, sub: str = "") -> str:
     subtitle = f'<p class="sub">{sub}</p>' if sub else ""
     return f'<article class="card"><h2>{title}</h2>{subtitle}{body}</article>'
@@ -336,6 +364,23 @@ def mutation_panel(rows: list[dict[str, Any]], run: dict[str, Any]) -> str:
         ), sub)
 
     first, last = rows[0], rows[-1]
+
+    # killed + survived is the only part of a mutmut run that carries
+    # information.  A run where every mutant came back "not checked" has a
+    # mutation_score of 0.0 that means "we learned nothing", and showing it
+    # as 0% — or worse, as "no surviving mutants" — reads as a result.
+    scored = int(last.get("killed") or 0) + int(last.get("survived_count") or 0)
+    if not scored and int(last.get("total") or 0):
+        return card("Mutation score", note("bad", (
+            f"<b>No mutation signal.</b> All {int(last['total'])} mutants came "
+            f"back inconclusive ({int(last.get('inconclusive') or 0)} "
+            "<code>not checked</code>) — mutmut generated them but never ran the "
+            "suite against any of them, so nothing was measured. This is "
+            "usually a path mismatch: <code>mutation_test</code> wants "
+            "<code>cwd</code> set to the project root that the target module "
+            "and <code>tests_dir</code> are relative to."
+        )), sub)
+
     score = float(last["mutation_score"])
     target = run.get("mutation_target")
 
@@ -694,15 +739,76 @@ def _gap_structure(calls: list[dict[str, Any]]) -> str:
     return details(f"Uncovered regions ({len(gaps)})", inner)
 
 
+def cost_panel(bundle: dict[str, Any]) -> str:
+    """
+    What the run cost in Bobcoin and tokens.
+
+    The server measures none of this — it never talks to a model.  The
+    figures are read out of Bob's own task ledger at finish_run, so the
+    panel always says where they came from and how they were attributed
+    rather than presenting them as something the pipeline observed.
+    """
+    sub = "Read from Bob's task ledger — the server cannot measure spend itself."
+    spend = spend_of(bundle)
+
+    if not spend:
+        return card("Cost — Bobcoin and tokens", note("info", (
+            "No cost recorded for this run. finish_run reads Bob's ledger "
+            "(<code>~/.bob/db/bob.db</code>) when it closes a run; a run that "
+            "was never closed, or one driven outside Bob, has nothing to read."
+        )), sub)
+
+    body = metrics(
+        metric("Bobcoin", fmt_coin(spend["cost"])),
+        metric("Total tokens", fmt_tokens(spend["total_tokens"])),
+        metric("Input", fmt_tokens(spend["input_tokens"])),
+        metric("Output", fmt_tokens(spend["output_tokens"])),
+    ) + metrics(
+        metric("Cache read", fmt_tokens(spend["cache_read_tokens"])),
+        metric("Cache write", fmt_tokens(spend["cache_write_tokens"])),
+        metric("Reasoning", fmt_tokens(spend["reasoning_tokens"])),
+        metric("Context peak", fmt_tokens(spend["context_tokens"])),
+    )
+
+    if spend.get("attribution") == "task-delta":
+        body += note("ok", (
+            "Measured as the <b>change</b> in Bob's task ledger between "
+            "<code>start_run</code> and <code>finish_run</code> — this run's own "
+            "spend, even if the same Bob task drove other work as well."
+        ))
+    else:
+        body += note("warn", (
+            "<b>Upper bound.</b> No baseline reading was taken at "
+            "<code>start_run</code>, so these are the whole Bob task's running "
+            "totals. If that task did anything besides this run, the real cost "
+            "of the run is lower."
+        ))
+
+    baseline = [r for r in bundle.get("usage") or []
+                if r.get("attribution") == "baseline"]
+    if baseline:
+        body += details("Baseline reading (the subtraction, audited)", table(
+            [{"attribution": r["attribution"], "cost": fmt_coin(r["cost"]),
+              "input": fmt_tokens(r["input_tokens"]),
+              "output": fmt_tokens(r["output_tokens"]),
+              "cache_read": fmt_tokens(r["cache_read_tokens"]),
+              "at": fmt_time(r["created_at"])}
+             for r in (bundle.get("usage") or [])]))
+
+    body += (f'<p class="filename">Bob task {esc(spend.get("task_id") or "—")} · '
+             f'ledger {esc(spend.get("source") or "—")}</p>')
+    return card("Cost — Bobcoin and tokens", body, sub)
+
+
 def activity_panel(calls: list[dict[str, Any]], run: dict[str, Any]) -> str:
     """
     The full tool-call log, iteration and cost counters.
 
-    Note on "Bobcoin": the MCP server is deterministic and never talks to a
-    model, so it cannot observe Bob's token spend — Bobalytics is the
-    authority there (P3).  What this panel reports instead is what the server
-    CAN measure honestly: how many tool calls a run took, how long they took,
-    and how many were served from the replay snapshot rather than executed.
+    Cost lives in its own panel, read from Bob's ledger: the server never
+    talks to a model and so can measure none of it.  What this panel reports
+    is what the server CAN measure honestly — how many tool calls a run took,
+    how long they took, and how many were served from the replay snapshot
+    rather than executed.
     """
     sub = "Every tool call the run made, in order."
     if not calls:
@@ -840,7 +946,11 @@ def kpi_strip(bundle: dict[str, Any]) -> str:
     """The eight numbers a judge should be able to read without scrolling."""
     run = bundle["run"]
     coverage = bundle["coverage"]
-    mutation = [m for m in bundle["mutation"] if m.get("engine_available", 1)]
+    # Same rule as the mutation panel: a run with nothing scored has no
+    # mutation number to report, and 0.0% would be a false one.
+    mutation = [m for m in bundle["mutation"]
+                if m.get("engine_available", 1)
+                and (int(m.get("killed") or 0) + int(m.get("survived_count") or 0))]
     calls = bundle["calls"]
     tests = bundle["tests"]
 
@@ -867,8 +977,21 @@ def kpi_strip(bundle: dict[str, Any]) -> str:
             change = f"{diff:+.1f} pts"
             direction = "up" if diff > 0 else "down" if diff < 0 else "flat"
         mut = metric("Mutation", f"{score:.1f}%", change, direction)
+    elif bundle["mutation"]:
+        mut = metric("Mutation", "—", "no signal", "down")
     else:
         mut = metric("Mutation", "—")
+
+    spend = spend_of(bundle)
+    if spend:
+        approximate = spend.get("attribution") == "task-totals"
+        coin = metric("Bobcoin", fmt_coin(spend["cost"]),
+                      "whole task" if approximate else "this run", "flat")
+        tok = metric("Tokens", fmt_tokens(spend["total_tokens"]),
+                     f'+{fmt_tokens(spend["cache_read_tokens"])} cached', "flat")
+    else:
+        coin = metric("Bobcoin", "—", "not recorded", "flat")
+        tok = metric("Tokens", "—")
 
     return '<div class="card kpis">' + metrics(
         metric("Status", status["label"], status_delta,
@@ -879,6 +1002,8 @@ def kpi_strip(bundle: dict[str, Any]) -> str:
         mut,
         metric("Tests kept", f"{sum(1 for t in tests if t['kept'])}/{len(tests)}"),
         metric("Defects", len(bundle["bugs"])),
+        coin,
+        tok,
         metric("Tool calls", len(calls)),
         metric("Tool time", fmt_duration(sum(c["duration_ms"] for c in calls))),
     ) + (
@@ -908,6 +1033,7 @@ def run_section(bundle: dict[str, Any], hidden: bool) -> str:
         + mutation_panel(bundle["mutation"], run)
         + "</div>"
         + '<div class="grid full">'
+        + cost_panel(bundle)
         + pipeline_panel(bundle["calls"])
         + bugs_panel(bundle["bugs"], bundle["calls"])
         + tests_panel(bundle["tests"], bundle["calls"])

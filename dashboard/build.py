@@ -64,6 +64,7 @@ def collect(limit: int = 50, db_path: Path | None = None) -> list[dict[str, Any]
             "mutation": db.mutation_for_run(run["run_id"], conn=conn),
             "bugs": db.bugs_for_run(run["run_id"], conn=conn),
             "gaps": db.gaps_for_run(run["run_id"], conn=conn),
+            "usage": db.usage_for_run(run["run_id"], conn=conn),
         } for run in runs]
 
 

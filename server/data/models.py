@@ -9,7 +9,7 @@ name their columns.  It performs NO I/O and imports nothing else from the
 server, so the dashboard (which must never import the tool layer) can read
 it as safely as the writers in db.py can.
 
-Seven tables (implementation plan §1, P4 deliverables):
+Eight tables (implementation plan §1, P4 deliverables, plus `usage`):
 
     runs              one row per pipeline run (the run_id every tool shares)
     tool_calls        the full "log everything" trail — one row per tool call
@@ -19,6 +19,8 @@ Seven tables (implementation plan §1, P4 deliverables):
     bugs_found        genuine defects (bug-vs-wrong-test path (a), AGENTS.md §4)
     gap_explanations  Bob's plain-language narration of uncovered regions,
                       persisted by store_explanation (AGENTS.md §5)
+    usage             Bobcoin cost and token counts for a run, read out of
+                      Bob's own task ledger — see server/data/usage.py
 
 Design notes that matter downstream:
 
@@ -43,7 +45,7 @@ from typing import Any
 
 # Bump only via a contract-change PR.  db.py stores this in `meta` and warns
 # when it opens a database written by a different schema version.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -164,6 +166,34 @@ CREATE TABLE IF NOT EXISTS gap_explanations (
     created_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_gaps_run ON gap_explanations(run_id);
+
+-- What the run COST: Bobcoins and tokens.
+--
+-- The MCP server never talks to a model, so it cannot measure this itself.
+-- These rows are copied out of Bob's own task ledger (~/.bob/db/bob.db) at
+-- finish_run, which is why `attribution` and `source` are columns: a number
+-- whose provenance is not recorded beside it is not evidence.  See
+-- server/data/usage.py for how the run window is matched to Bob messages.
+CREATE TABLE IF NOT EXISTS usage (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id             TEXT    NOT NULL,
+    task_id            TEXT    NOT NULL DEFAULT '',
+    input_tokens       INTEGER NOT NULL DEFAULT 0,
+    output_tokens      INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens   INTEGER NOT NULL DEFAULT 0,
+    total_tokens       INTEGER NOT NULL DEFAULT 0,
+    context_tokens     INTEGER NOT NULL DEFAULT 0,
+    cost               REAL    NOT NULL DEFAULT 0.0,
+    message_count      INTEGER NOT NULL DEFAULT 0,
+    -- 'messages-in-window' (only Bob turns inside the run) or 'task-totals'
+    -- (the whole task, which may cover more than this run)
+    attribution        TEXT    NOT NULL DEFAULT '',
+    source             TEXT    NOT NULL DEFAULT '',
+    created_at         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_usage_run ON usage(run_id);
 """
 
 
@@ -263,4 +293,30 @@ class GapExplanation:
     text: str
     source_file: str = ""
     gaps: list[dict[str, Any]] = field(default_factory=list)
+    created_at: int = 0
+
+
+@dataclass
+class UsageRow:
+    """
+    One run's model spend, as reported by Bob — never measured here.
+
+    `cost` is Bobcoins.  `total_tokens` is input + output only: cache reads
+    and writes are billed differently and are kept as their own columns so
+    the dashboard can show the split rather than a single number that hides
+    where the spend went.
+    """
+    run_id: str
+    task_id: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
+    total_tokens: int = 0
+    context_tokens: int = 0
+    cost: float = 0.0
+    message_count: int = 0
+    attribution: str = ""
+    source: str = ""
     created_at: int = 0

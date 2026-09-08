@@ -175,7 +175,11 @@ main { max-width: 1240px; margin: 0 auto; padding: 20px; }
    tile and then strands the last one on a row of its own, and these eight
    values (one of which can be a word like "incomplete") need the room. */
 .kpis { margin-bottom: 16px; }
-.kpis .metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.kpis .metrics { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+
+@media (max-width: 1100px) {
+  .kpis .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
 
 @media (max-width: 760px) {
   .kpis .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }

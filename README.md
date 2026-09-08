@@ -64,6 +64,8 @@ Fourteen tools are live on the server today. Optional engines degrade rather tha
 
 A run is opened by `start_run` and closed by `finish_run` — Bob calls both, and threads the returned `run_id` through every call in between. Nothing else closes a run, so an unclosed run shows on the dashboard as `incomplete` rather than silently claiming to still be in progress.
 
+**Cost is read, never reported.** The server never talks to a model, so it cannot measure Bobcoin or tokens — and a model asked to report its own token count is guessing. Instead `start_run` and `finish_run` each take a reading from Bob Shell's own task ledger (`~/.bob/db/bob.db`, override with `BOB_DB`) and store the difference in the `usage` table. The dashboard labels every figure with how it was attributed: `task-delta` (this run's own spend) or `task-totals` (an upper bound, when no baseline reading exists).
+
 ## Repository layout
 
 ```

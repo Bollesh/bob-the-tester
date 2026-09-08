@@ -33,9 +33,16 @@ import time
 import uuid
 from typing import Any
 
-from server.data import db
+from pathlib import Path
+
+from server.data import db, usage
+from server.data.models import UsageRow
 from server.data.replay import replay_enabled
 from server.schema import ToolResult
+
+# server/data/runs.py → server/data → server → repo root.  This is the
+# workspace Bob has open, and the key the usage ledger is matched on.
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Statuses the dashboard knows how to present.  Anything else is stored
 # verbatim — the tool records what it was told rather than second-guessing
@@ -88,6 +95,15 @@ def start_run(
         replay_mode=replay,
     )
 
+    # Baseline reading of Bob's ledger, so finish_run can report what THIS
+    # run cost rather than what the whole Bob task has cost so far.  Best
+    # effort in every sense: no ledger, no baseline, no problem.
+    baseline = usage.snapshot(str(REPO_ROOT))
+    if baseline:
+        db.insert_usage(UsageRow(run_id=run_id, attribution="baseline",
+                                 **{k: v for k, v in baseline.items()
+                                    if k in UsageRow.__dataclass_fields__}))
+
     targets = []
     if coverage_pct is not None:
         targets.append(f"coverage ≥ {coverage_pct:.0f}%")
@@ -120,6 +136,7 @@ def start_run(
             "max_iterations": max_iterations,
             "replay_mode": replay,
             "db_path": str(db.db_path()),
+            "usage_baseline": bool(baseline),
         },
         artifacts=[],
         duration_ms=int((time.time() - started) * 1000),
@@ -167,6 +184,8 @@ def finish_run(
     if row and row.get("finished_at") and row.get("started_at"):
         duration_ms = int(row["finished_at"] - row["started_at"])
 
+    spend = _record_usage(run_id)
+
     verdict = f"Run {run_id} closed as '{status}'"
     if duration_ms is not None:
         verdict += f" after {duration_ms / 1000:.1f}s"
@@ -176,6 +195,11 @@ def finish_run(
         verdict += " (the run row was backfilled — start_run was never called)"
     if not closed:
         verdict += " — WARNING: the database write failed; the run stays open"
+    if spend:
+        verdict += (f" — spent {spend['cost']:.4f} Bobcoin, "
+                    f"{spend['total_tokens']:,} tokens")
+        if spend["attribution"] == "task-totals":
+            verdict += " (whole-task upper bound: no baseline reading)"
     if status not in KNOWN_STATUSES:
         verdict += (f" — note: '{status}' is not one of "
                     f"{'/'.join(KNOWN_STATUSES)}, and is stored verbatim")
@@ -194,8 +218,28 @@ def finish_run(
             "duration_ms": duration_ms,
             "finished_at": row.get("finished_at") if row else None,
             "notes": notes,
+            "usage": spend,
         },
         artifacts=[],
         duration_ms=int((time.time() - started) * 1000),
         run_id=run_id,
     )
+
+
+def _record_usage(run_id: str) -> dict[str, Any] | None:
+    """
+    Take a closing reading of Bob's ledger and store this run's share.
+
+    Returns the stored figures, or None when the ledger could not be read —
+    in which case the run simply has no cost recorded, which the dashboard
+    shows as "not recorded" rather than as zero.
+    """
+    final = usage.snapshot(str(REPO_ROOT))
+    if not final:
+        return None
+
+    spend = usage.subtract(db.usage_baseline(run_id), final)
+    db.insert_usage(UsageRow(run_id=run_id,
+                             **{k: v for k, v in spend.items()
+                                if k in UsageRow.__dataclass_fields__}))
+    return spend

@@ -39,6 +39,7 @@ from server.data.models import (
     MutationRow,
     TestRecord,
     ToolCall,
+    UsageRow,
 )
 
 logger = logging.getLogger("bob-the-tester.db")
@@ -366,6 +367,32 @@ def insert_gap_explanation(gap: GapExplanation) -> bool:
         return False
 
 
+def insert_usage(row: UsageRow) -> bool:
+    """Record what a run cost.  See server/data/usage.py for provenance."""
+    try:
+        ensure_run(row.run_id)
+        with _write() as conn:
+            conn.execute(
+                """
+                INSERT INTO usage
+                    (run_id, task_id, input_tokens, output_tokens,
+                     cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                     total_tokens, context_tokens, cost, message_count,
+                     attribution, source, created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (row.run_id, row.task_id, row.input_tokens, row.output_tokens,
+                 row.cache_read_tokens, row.cache_write_tokens,
+                 row.reasoning_tokens, row.total_tokens, row.context_tokens,
+                 float(row.cost), row.message_count, row.attribution,
+                 row.source, row.created_at or now_ms()),
+            )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("insert_usage failed: %s", exc)
+        return False
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Readers (dashboard API — read-only connections)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -473,6 +500,40 @@ def gaps_for_run(run_id: str, conn: sqlite3.Connection | None = None) -> list[di
     finally:
         if own:
             conn.close()
+
+
+def usage_for_run(run_id: str, conn: sqlite3.Connection | None = None) -> list[dict[str, Any]]:
+    """
+    Cost rows for a run — empty when the database predates the `usage` table.
+
+    A dashboard opened against an older database must render, not crash: the
+    demo machine and the database on it are not always the same age as the
+    code.  Readers for tables added after schema v1 therefore degrade to an
+    empty result rather than raising.
+    """
+    own = conn is None
+    conn = conn or connect_ro()
+    try:
+        return _rows(conn, "SELECT * FROM usage WHERE run_id=? ORDER BY id", (run_id,))
+    except sqlite3.OperationalError as exc:
+        logger.debug("usage table unavailable: %s", exc)
+        return []
+    finally:
+        if own:
+            conn.close()
+
+
+def usage_baseline(run_id: str) -> dict[str, Any] | None:
+    """The reading start_run took, for finish_run to subtract."""
+    try:
+        with closing(connect_ro()) as conn:
+            rows = _rows(conn,
+                         "SELECT * FROM usage WHERE run_id=? AND attribution='baseline' "
+                         "ORDER BY id DESC LIMIT 1", (run_id,))
+        return rows[0] if rows else None
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("usage_baseline lookup failed: %s", exc)
+        return None
 
 
 def latest_artifact(run_id: str, tool: str) -> str:
