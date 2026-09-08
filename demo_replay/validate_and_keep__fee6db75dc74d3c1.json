@@ -1,0 +1,30 @@
+{
+  "tool": "validate_and_keep",
+  "key": "fee6db75dc74d3c1",
+  "normalised_args": {
+    "candidate": {
+      "new_imports": "from calculator import multiply, divide, power, factorial, is_prime, gcd",
+      "test_code": "def test_multiply_two_positives_returns_product():\n    \"\"\"Happy path: multiplying two positive numbers returns their product.\"\"\"\n    result = multiply(3, 4)\n    assert result == 12"
+    },
+    "cwd": ".",
+    "source_file": "sample_repo/src/calculator.py",
+    "test_file": "sample_repo/tests/test_placeholder.py"
+  },
+  "result": {
+    "tool": "validate_and_keep",
+    "ok": true,
+    "score": 0.0,
+    "proceed": false,
+    "verdict": "DISCARDED \u2014 Suite failed after insertion: 0 failed, 1 errors. Verdict: 0 passed, 0 failed, 1 errors, 0 skipped \u2014 suite FAILED, pipeline halted",
+    "details": {
+      "kept": false,
+      "reason": "Suite failed after insertion: 0 failed, 1 errors. Verdict: 0 passed, 0 failed, 1 errors, 0 skipped \u2014 suite FAILED, pipeline halted",
+      "coverage_before": 25.58,
+      "coverage_after": null,
+      "rollback_performed": true
+    },
+    "artifacts": [],
+    "duration_ms": 1956,
+    "run_id": "46297eb6-85c6-4c9d-9631-7a940f2e0429"
+  }
+}

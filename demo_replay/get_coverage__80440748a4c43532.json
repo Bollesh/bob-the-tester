@@ -55,9 +55,9 @@
       "uncovered_count": 32
     },
     "artifacts": [
-      "d:\\workspace\\bob-the-tester\\coverage.xml"
+      "/run/media/bolleshjonathan/New Volume/BOB/bob-the-tester/coverage.xml"
     ],
-    "duration_ms": 15,
-    "run_id": "calc-gen-cover-01"
+    "duration_ms": 0,
+    "run_id": "46297eb6-85c6-4c9d-9631-7a940f2e0429"
   }
 }
