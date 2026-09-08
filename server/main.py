@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
+from pathlib import Path
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -52,6 +54,38 @@ from server.gaps import explain_gaps, save_test_record, store_explanation
 logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                     format="%(asctime)s [bob-the-tester] %(levelname)s %(message)s")
 logger = logging.getLogger("bob-the-tester")
+
+# server/main.py → server → repo root
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _add_file_log() -> None:
+    """
+    Mirror the log to a file as well as stderr.
+
+    An IDE-launched STDIO server has nowhere useful to put stderr: it goes
+    to whatever pane the client happens to keep, and in practice it is
+    gone.  That is exactly the output you need when a tool call did not
+    make it into the database — every db.py writer swallows its exception
+    and warns here rather than failing the call.
+
+    Override the location with BOB_THE_TESTER_LOG.  Failing to open the
+    file is not fatal: the server must start even on a read-only checkout.
+    """
+    target = os.environ.get("BOB_THE_TESTER_LOG", "").strip()
+    path = Path(target) if target else REPO_ROOT / "logs" / "server.log"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(path, encoding="utf-8")
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(name)s] %(levelname)s %(message)s"))
+        logging.getLogger().addHandler(handler)
+        logger.info("Logging to %s", path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not open log file %s: %s", path, exc)
+
+
+_add_file_log()
 
 app = Server("bob-the-tester")
 
