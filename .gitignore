@@ -33,6 +33,7 @@ __pycache__/
 dist/
 build/
 *.egg
+.venv/
 
 # Env
 .env
