@@ -32,6 +32,12 @@ flag and enforcing hard iteration/budget caps.
 | `property_max_examples` | `200` | Max examples for Hypothesis property tests |
 | `mutant_kill_rounds` | `2` | Max MuTAP regeneration rounds for surviving mutants |
 
+> **Run identity:** The whole pipeline is one run. `start_run` (stage 0)
+> returns a `run_id`; pass it to **every** subsequent tool call, and close
+> the run with `finish_run` (stage 13d) on **every** exit path — success,
+> failure, or early stop. A run that is never closed keeps reporting itself
+> as still in progress on the dashboard forever.
+
 > **Budget enforcement:** Track the iteration counter explicitly.
 > Before starting each outer-loop iteration, check:
 > `if current_iteration >= max_iterations: → go directly to Stage 13 (report).`
@@ -39,13 +45,31 @@ flag and enforcing hard iteration/budget caps.
 
 ---
 
-## Stage 0 — Baseline Coverage (Tool Call)
+## Stage 0 — Open the Run and Take a Baseline (Tool Call)
 
 **Actor:** MCP tool (Layer 2)
-**Purpose:** Establish the starting coverage so we can measure improvement.
+**Purpose:** Give the run an identity and its targets, then establish the
+starting coverage so we can measure improvement.
+
+**First call, once per pipeline — skip it and every metric below is
+orphaned from its targets:**
 
 ```
-Call: get_coverage(report_path="coverage.xml", source_file="{source_file}")
+Call: start_run(source_file="{source_file}",
+                coverage_target={coverage_target},
+                mutation_target={mutation_target},
+                max_iterations={max_iterations})
+```
+
+**Read from response:**
+- `details.run_id` → store as `run_id` and pass it to **every** later tool
+  call in this pipeline, including the re-entries from Stage 12
+
+Then take the baseline:
+
+```
+Call: get_coverage(report_path="coverage.xml", source_file="{source_file}",
+                   run_id="{run_id}")
 ```
 
 **Read from response:**
@@ -505,7 +529,32 @@ Call: store_explanation(text="...")
 | Iterations used | `{current_iteration}` / `{max_iterations}` |
 | Intentional coverage gaps | `{gap_explanations}` |
 
-### 13d. Session Evidence
+### 13d. Close the Run (Tool Call)
+
+**Do this on EVERY exit path — including the ones that went badly.**
+
+```
+Call: finish_run(run_id="{run_id}",
+                 status="complete",
+                 iterations_used={current_iteration},
+                 notes="one line on how the run ended")
+```
+
+| Situation | `status` |
+|---|---|
+| Reached stage 13 with targets met, or with an honest gap explanation | `complete` |
+| A tool returned `ok: false` and broke the pipeline | `failed` |
+| Stopped early — iteration cap, budget, user interrupt | `aborted` |
+
+**Read from response:**
+- `details.closed` → if `false`, the database write failed; say so in the
+  final report rather than claiming a clean finish
+- `details.duration_ms` → the run's wall-clock length, for the report
+
+Nothing else in the system closes a run. Skip this call and the dashboard
+shows the run as still in progress for as long as the database exists.
+
+### 13e. Session Evidence
 
 **After the report is complete:**
 1. Export the task history / session report.
@@ -519,6 +568,7 @@ Call: store_explanation(text="...")
 
 | Stage | Actor | What happens |
 |---|---|---|
+| 0. Open run | **Tool** (`start_run`) | Mechanical: record targets, return the `run_id` |
 | 0. Baseline coverage | **Tool** (`get_coverage`) | Mechanical: parse XML, return numbers |
 | 1. Edge-case map | **Bob** | Judgment: analyse source, plan scenarios |
 | 2. Generate tests | **Bob** | Judgment: write code per scenarios |
@@ -537,6 +587,7 @@ Call: store_explanation(text="...")
 | 13a. Gap data | **Tool** (`explain_gaps`) | Mechanical: structured gap info |
 | 13b. Gap narration | **Bob** | Judgment: write plain-language explanations |
 | 13c. Final report | **Bob** | Judgment: compile metrics, produce summary |
+| 13d. Close run | **Tool** (`finish_run`) | Mechanical: stamp status, finish time, iterations |
 
 ---
 
@@ -553,3 +604,7 @@ Call: store_explanation(text="...")
   continue.
 - On unexpected exceptions from Bob: save whatever progress was made,
   produce a partial report, and export to `bob_sessions/`.
+- **However the pipeline ends, call `finish_run` before you stop** —
+  `status="failed"` when a tool broke it, `status="aborted"` when you
+  stopped early, with the reason in `notes`. This is the last thing you do
+  in every case; an unclosed run misreports itself as running forever.

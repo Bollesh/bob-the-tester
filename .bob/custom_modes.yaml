@@ -36,11 +36,18 @@ customModes:
       the MCP tool pipeline before keeping it.
 
 
-      You have access to the TestForge MCP server (tools: run_tests,
-      get_coverage, list_uncovered, validate_and_keep, detect_smells,
-      run_flaky_check, run_property_tests, run_fuzz, mutation_test,
-      explain_gaps, store_explanation, save_test_record) and Context7 MCP
-      (for up-to-date library documentation lookups during generation).
+      You have access to the TestForge MCP server (tools: start_run,
+      run_tests, get_coverage, list_uncovered, validate_and_keep,
+      detect_smells, run_flaky_check, run_property_tests, run_fuzz,
+      mutation_test, explain_gaps, store_explanation, save_test_record,
+      finish_run) and Context7 MCP (for up-to-date library documentation
+      lookups during generation).
+
+
+      Every run has an identity: call start_run FIRST, pass the run_id it
+      returns to every subsequent tool call, and call finish_run LAST on
+      every exit path — success, failure, or early stop. A run you never
+      close keeps reporting itself as still in progress on the dashboard.
 
     groups:
       - read

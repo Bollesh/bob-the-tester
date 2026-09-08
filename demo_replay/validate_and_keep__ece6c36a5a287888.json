@@ -1,0 +1,30 @@
+{
+  "tool": "validate_and_keep",
+  "key": "ece6c36a5a287888",
+  "normalised_args": {
+    "candidate": {
+      "new_imports": "",
+      "test_code": "def test_multiply_two_negatives_returns_positive():\n    \"\"\"Happy path: product of two negatives is positive.\"\"\"\n    assert multiply(-3, -4) == 12"
+    },
+    "cwd": ".",
+    "source_file": "sample_repo/src/calculator.py",
+    "test_file": "sample_repo/tests/test_placeholder.py"
+  },
+  "result": {
+    "tool": "validate_and_keep",
+    "ok": true,
+    "score": 0.0,
+    "proceed": false,
+    "verdict": "DISCARDED \u2014 Coverage did not strictly increase: 27.91% \u2192 27.91%.  Candidate adds no new lines.  Discarded per Assured-LLMSE filter.",
+    "details": {
+      "kept": false,
+      "reason": "Coverage did not strictly increase: 27.91% \u2192 27.91%.  Candidate adds no new lines.  Discarded per Assured-LLMSE filter.",
+      "coverage_before": 27.91,
+      "coverage_after": 27.91,
+      "rollback_performed": true
+    },
+    "artifacts": [],
+    "duration_ms": 2912,
+    "run_id": "46297eb6-85c6-4c9d-9631-7a940f2e0429"
+  }
+}

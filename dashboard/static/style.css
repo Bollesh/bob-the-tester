@@ -1,0 +1,306 @@
+/*
+ * Bob the Tester dashboard — stylesheet.
+ *
+ * Inlined into the generated page at build time, so the report is a single
+ * file that opens from disk with no server and no network.  Tokens are
+ * defined once on :root and overridden under prefers-color-scheme, so the
+ * page follows the reader's OS theme without any JavaScript.
+ */
+
+:root {
+  --bg:        #f6f7f9;
+  --panel:     #ffffff;
+  --panel-2:   #f0f2f5;
+  --border:    #d9dee6;
+  --text:      #16191d;
+  --muted:     #5c6672;
+  --accent:    #3b6fd4;
+  --ok:        #1f8a4c;
+  --warn:      #b7791f;
+  --bad:       #c0392b;
+  --shadow:    0 1px 2px rgba(16, 20, 26, .06), 0 4px 16px rgba(16, 20, 26, .05);
+  --radius:    10px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:      #14171c;
+    --panel:   #1b1f26;
+    --panel-2: #232830;
+    --border:  #2e343d;
+    --text:    #e6e9ee;
+    --muted:   #98a2b0;
+    --accent:  #6f9dfa;
+    --ok:      #45c07a;
+    --warn:    #e0a84a;
+    --bad:     #e8695c;
+    --shadow:  0 1px 2px rgba(0, 0, 0, .4);
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+a { color: var(--accent); }
+code, pre, .mono { font-family: var(--mono); }
+
+/* ── Top bar ─────────────────────────────────────────────────────────── */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand { font-size: 17px; font-weight: 650; letter-spacing: -.01em; }
+.tagline { color: var(--muted); font-size: 13px; flex: 1 1 260px; }
+
+.topbar select {
+  max-width: 100%;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.badge {
+  padding: 3px 9px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.badge.ok   { color: var(--ok);   border-color: color-mix(in srgb, var(--ok) 40%, var(--border)); }
+.badge.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--border)); }
+.badge.bad  { color: var(--bad);  border-color: color-mix(in srgb, var(--bad) 40%, var(--border)); }
+
+/* ── Layout ──────────────────────────────────────────────────────────── */
+
+main { max-width: 1240px; margin: 0 auto; padding: 20px; }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+  /* Cards size to their own content instead of stretching to the tallest
+     one in the row — an empty half-panel reads as missing data. */
+  align-items: start;
+}
+.grid.full { grid-template-columns: 1fr; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 16px 18px;
+  min-width: 0;
+}
+
+.card > h2 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -.01em;
+}
+.card > h2 + .sub { margin: 0 0 14px; color: var(--muted); font-size: 12.5px; }
+.card h3 {
+  margin: 18px 0 8px;
+  font-size: 13px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--muted);
+}
+
+/* ── Metrics ─────────────────────────────────────────────────────────── */
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+  margin: 0 0 14px;
+}
+
+.metric {
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-width: 0;
+}
+.metric .label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--muted);
+}
+.metric .value {
+  margin-top: 3px;
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -.02em;
+  /* break-word, not anywhere: a value should only ever split when it
+     genuinely cannot fit, never mid-word to save a few pixels. */
+  overflow-wrap: break-word;
+}
+.metric .delta { font-size: 12px; font-weight: 600; }
+.delta.up   { color: var(--ok); }
+.delta.down { color: var(--bad); }
+.delta.flat { color: var(--muted); }
+
+/* The KPI strip at the top of a run reuses .metric on a card of its own.
+   Fixed 4×2 rather than auto-fit: auto-fit sizes columns to the narrowest
+   tile and then strands the last one on a row of its own, and these eight
+   values (one of which can be a word like "incomplete") need the room. */
+.kpis { margin-bottom: 16px; }
+.kpis .metrics { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+
+@media (max-width: 1100px) {
+  .kpis .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 760px) {
+  .kpis .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ── Notes ───────────────────────────────────────────────────────────── */
+
+.note {
+  padding: 9px 12px;
+  margin: 10px 0;
+  border-left: 3px solid var(--muted);
+  border-radius: 0 6px 6px 0;
+  background: var(--panel-2);
+  font-size: 13.5px;
+}
+.note.ok   { border-left-color: var(--ok); }
+.note.warn { border-left-color: var(--warn); }
+.note.bad  { border-left-color: var(--bad); }
+.note.info { border-left-color: var(--accent); }
+
+/* ── Tables ──────────────────────────────────────────────────────────── */
+
+.tablewrap { overflow-x: auto; margin: 8px 0; }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+th, td {
+  padding: 7px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  white-space: nowrap;
+}
+th {
+  position: sticky;
+  top: 0;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--muted);
+  background: var(--panel);
+}
+tbody tr:hover td { background: var(--panel-2); }
+td.wrap { white-space: normal; min-width: 220px; }
+td.num  { text-align: right; font-family: var(--mono); }
+.yes { color: var(--ok); font-weight: 700; }
+.no  { color: var(--muted); }
+
+/* ── Progress ────────────────────────────────────────────────────────── */
+
+.bar {
+  position: relative;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  margin: 6px 0 4px;
+}
+.bar > span { display: block; height: 100%; background: var(--accent); }
+.bar.ok   > span { background: var(--ok); }
+.bar.warn > span { background: var(--warn); }
+.bar.bad  > span { background: var(--bad); }
+
+/* ── Code / details ──────────────────────────────────────────────────── */
+
+pre {
+  margin: 6px 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.45;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+details {
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+details > summary {
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  list-style: none;
+}
+details > summary::-webkit-details-marker { display: none; }
+details > summary::before { content: "▸ "; color: var(--muted); }
+details[open] > summary::before { content: "▾ "; }
+details > .body { padding: 0 12px 12px; }
+
+.prose { font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.prose + .prose { margin-top: 14px; }
+.prose code, .note code { color: var(--accent); font-size: .93em; }
+.prose b { font-weight: 650; }
+.filename {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.chart { overflow-x: auto; }
+.chart svg { display: block; max-width: 100%; }
+
+footer {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 8px 20px 40px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (max-width: 640px) {
+  main { padding: 12px; }
+  .grid { grid-template-columns: 1fr; }
+}

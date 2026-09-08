@@ -23,6 +23,14 @@ import shutil
 import sys
 from pathlib import Path
 
+# ── Force UTF-8 stdout on Windows (avoids cp1252 UnicodeEncodeError) ─────────
+# Same guard smoke.py already carries: this script prints box-drawing
+# characters, which crash the default Windows console codepage.
+if sys.platform == "win32":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SAMPLE_TESTS_DIR = REPO_ROOT / "sample_repo" / "tests"
 

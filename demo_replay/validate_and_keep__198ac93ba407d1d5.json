@@ -1,0 +1,32 @@
+{
+  "tool": "validate_and_keep",
+  "key": "198ac93ba407d1d5",
+  "normalised_args": {
+    "candidate": {
+      "new_imports": "",
+      "test_code": "def test_factorial_positive_int_returns_correct_value():\n    \"\"\"Happy path: 5! = 120.\"\"\"\n    assert factorial(5) == 120"
+    },
+    "cwd": ".",
+    "source_file": "sample_repo/src/calculator.py",
+    "test_file": "sample_repo/tests/test_placeholder.py"
+  },
+  "result": {
+    "tool": "validate_and_keep",
+    "ok": true,
+    "score": 0.931,
+    "proceed": true,
+    "verdict": "KEPT \u2014 Passed and strictly increased coverage: 55.81% \u2192 65.12% (+9.31%)",
+    "details": {
+      "kept": true,
+      "reason": "Passed and strictly increased coverage: 55.81% \u2192 65.12% (+9.31%)",
+      "coverage_before": 55.81,
+      "coverage_after": 65.12,
+      "rollback_performed": false
+    },
+    "artifacts": [
+      "/run/media/bolleshjonathan/New Volume/BOB/bob-the-tester/sample_repo/tests/test_placeholder.py"
+    ],
+    "duration_ms": 2918,
+    "run_id": "46297eb6-85c6-4c9d-9631-7a940f2e0429"
+  }
+}

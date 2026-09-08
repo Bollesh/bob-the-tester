@@ -34,10 +34,10 @@ pipeline = [
     "mutmut>=3.0",
     "pytest-rerunfailures>=14.0",
 ]
-# P4 dashboard
-dashboard = [
-    "streamlit>=1.35",
-]
+# The P4 dashboard is standard-library only — static HTML rendered by
+# dashboard/build.py — so it needs no extra.  The name is kept so an older
+# `pip install -e ".[dashboard]"` in someone's notes still resolves.
+dashboard = []
 # Install everything
 dev = [
     "bob-the-tester[pipeline,dashboard]",

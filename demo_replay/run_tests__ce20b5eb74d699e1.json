@@ -1,0 +1,49 @@
+{
+  "tool": "run_tests",
+  "key": "ce20b5eb74d699e1",
+  "normalised_args": {
+    "cwd": ".",
+    "test_command": "sample_repo/tests/test_placeholder.py -v --cov=sample_repo/src/calculator --cov-report=xml:coverage.xml"
+  },
+  "result": {
+    "tool": "run_tests",
+    "ok": true,
+    "score": 1.0,
+    "proceed": true,
+    "verdict": "3 passed, 0 failed, 0 errors, 0 skipped",
+    "details": {
+      "passed": 3,
+      "failed": 0,
+      "errors": 0,
+      "skipped": 0,
+      "junit_summary": [
+        {
+          "name": "test_add_positive",
+          "classname": "sample_repo.tests.test_placeholder",
+          "status": "passed",
+          "message": ""
+        },
+        {
+          "name": "test_add_zero",
+          "classname": "sample_repo.tests.test_placeholder",
+          "status": "passed",
+          "message": ""
+        },
+        {
+          "name": "test_subtract_positive",
+          "classname": "sample_repo.tests.test_placeholder",
+          "status": "passed",
+          "message": ""
+        }
+      ],
+      "stderr_tail": "C:\\Users\\uthka\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\coverage\\inorout.py:558: CoverageWarning: Module sample_repo/src/calculator was never imported. (module-not-imported); see https://coverage.readthedocs.io/en/7.15.4/messages.html#warning-module-not-imported\n  self.warn(f\"Module {pkg} was never imported.\", slug=\"module-not-imported\")\nC:\\Users\\uthka\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\coverage\\control.py:963: CoverageWarning: No data was collected. (no-data-collected); see https://coverage.readthedocs.io/en/7.15.4/messages.html#warning-no-data-collected\n  self._warn(\"No data was collected.\", slug=\"no-data-collected\")\nC:\\Users\\uthka\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\pytest_cov\\plugin.py:366: CovReportWarning: Failed to generate report: No data to report.\n\n  warnings.warn(CovReportWarning(message), stacklevel=1)",
+      "stdout_tail": "============================= test session starts =============================\nplatform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0 -- C:\\Users\\uthka\\AppData\\Local\\Programs\\Python\\Python312\\python.exe\ncachedir: .pytest_cache\nhypothesis profile 'default'\nrootdir: d:\\workspace\\bob-the-tester\nconfigfile: pyproject.toml\nplugins: anyio-4.14.2, hypothesis-6.165.10, cov-7.1.0, rerunfailures-16.6\ncollecting ... collected 3 items\n\nsample_repo/tests/test_placeholder.py::test_add_positive PASSED          [ 33%]\nsample_repo/tests/test_placeholder.py::test_add_zero PASSED              [ 66%]\nsample_repo/tests/test_placeholder.py::test_subtract_positive PASSED     [100%]\nWARNING: Failed to generate report: No data to report.\n\n\n\n----- generated xml file: d:\\workspace\\bob-the-tester\\junit_fowidiap.xml ------\n============================== 3 passed in 1.65s ==============================",
+      "return_code": 0
+    },
+    "artifacts": [
+      "d:\\workspace\\bob-the-tester\\junit_fowidiap.xml"
+    ],
+    "duration_ms": 64750,
+    "run_id": "calc-gen-cover-01"
+  }
+}

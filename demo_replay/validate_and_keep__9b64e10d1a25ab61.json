@@ -1,0 +1,32 @@
+{
+  "tool": "validate_and_keep",
+  "key": "9b64e10d1a25ab61",
+  "normalised_args": {
+    "candidate": {
+      "new_imports": "",
+      "test_code": "def test_is_prime_two_returns_true():\n    \"\"\"Boundary: 2 is the smallest and only even prime number.\"\"\"\n    assert is_prime(2) is True"
+    },
+    "cwd": ".",
+    "source_file": "sample_repo/src/calculator.py",
+    "test_file": "sample_repo/tests/test_placeholder.py"
+  },
+  "result": {
+    "tool": "validate_and_keep",
+    "ok": true,
+    "score": 0.465,
+    "proceed": true,
+    "verdict": "KEPT \u2014 Passed and strictly increased coverage: 74.42% \u2192 79.07% (+4.65%)",
+    "details": {
+      "kept": true,
+      "reason": "Passed and strictly increased coverage: 74.42% \u2192 79.07% (+4.65%)",
+      "coverage_before": 74.42,
+      "coverage_after": 79.07,
+      "rollback_performed": false
+    },
+    "artifacts": [
+      "/run/media/bolleshjonathan/New Volume/BOB/bob-the-tester/sample_repo/tests/test_placeholder.py"
+    ],
+    "duration_ms": 2876,
+    "run_id": "46297eb6-85c6-4c9d-9631-7a940f2e0429"
+  }
+}

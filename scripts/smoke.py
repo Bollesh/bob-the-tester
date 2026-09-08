@@ -39,6 +39,32 @@ What it tests:
     12. mutation_test      — mutants generated, survivors carry resolved file
                              lines and original→mutated source
 
+    P4 data layer:
+    13. data layer      — schema, run/tool_call/test/coverage/mutation writers,
+                          and the read-only reader API the dashboard uses
+    14. logging_mw      — every call lands in tool_calls; structured payloads
+                          fan out to the typed tables; the result is returned
+                          unchanged even when the tool itself failed
+    15. replay cache    — keys ignore run_id and are path-portable across
+                          machines; BOB_THE_TESTER_REPLAY=1 serves cached
+                          results without executing anything
+    16. explain_gaps    — real uncovered regions with function context and
+                          objective signals; finds its own coverage report
+    17. store_explanation / save_test_record
+                        — gap prose persists; a defect-finding test is KEPT
+                          and recorded in bugs_found, a wrong test is not
+    18. start_run / finish_run
+                        — a run opens with normalised targets and closes with
+                          a status; a run nobody opened is backfilled; neither
+                          tool is ever served from the replay cache
+    19. usage           — Bobcoin and tokens read out of Bob's ledger, the
+                          baseline subtraction, and the upper-bound fallback
+
+Checks 13–19 use a temporary database, replay directory and Bob ledger, so a
+smoke run never touches bob-the-tester.db, the blessed demo_replay/ snapshot,
+or the developer's own ~/.bob/db/bob.db.
+
+
 Stages 10–12 depend on optional engines (Hypothesis, Atheris, mutmut).  When
 an engine is absent the check asserts CLEAN DEGRADATION instead — proceed
 stays true and engine_available reports false — so a machine without the
@@ -46,8 +72,10 @@ stays true and engine_available reports false — so a machine without the
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -669,13 +697,462 @@ else:
 # ── Clean up P2 fixtures ─────────────────────────────────────────────────────
 shutil.rmtree(P2_TMP, ignore_errors=True)
 
+# ═════════════════════════════════════════════════════════════════════════════
+# P4 — DATA LAYER, REPLAY CACHE, GAP TOOLS
+#
+# These run against a TEMPORARY database and a TEMPORARY replay directory, so
+# a smoke run never pollutes the demo database or the blessed demo_replay/
+# snapshot.  Both are selected purely through environment variables, which is
+# also the mechanism the CI job and reset_demo.py use.
+# ═════════════════════════════════════════════════════════════════════════════
+
+P4_TMP = Path(tempfile.mkdtemp(prefix="bob_p4_"))
+os.environ["BOB_THE_TESTER_DB"] = str(P4_TMP / "smoke.db")
+os.environ["BOB_THE_TESTER_REPLAY_DIR"] = str(P4_TMP / "replay")
+os.environ["BOB_THE_TESTER_REPLAY"] = "0"
+
+from server.data import db as p4_db                      # noqa: E402
+from server.data.logging_mw import log_tool_call         # noqa: E402
+from server.data.models import SCHEMA_VERSION            # noqa: E402
+from server.data import replay as p4_replay              # noqa: E402
+from server.data.runs import (                            # noqa: E402
+    finish_run as finish_run_tool,
+    start_run as start_run_tool,
+)
+from server.gaps import (                                # noqa: E402
+    explain_gaps,
+    save_test_record,
+    store_explanation,
+)
+
+P4_RUN = "smoke-run-0000"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check 13: database schema + writers + readers
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("13 - data layer: schema, writers, readers")
+
+check("temp DB path is honoured", p4_db.db_path() == (P4_TMP / "smoke.db").resolve()
+      or str(p4_db.db_path()).endswith("smoke.db"), str(p4_db.db_path()))
+
+p4_db.start_run(P4_RUN, source_file="sample_repo/src/calculator.py",
+                coverage_target=85.0, mutation_target=0.8, max_iterations=3)
+runs = p4_db.list_runs()
+check("run row created", any(r["run_id"] == P4_RUN for r in runs),
+      f"got {[r['run_id'] for r in runs]}")
+
+run_row = p4_db.get_run(P4_RUN)
+check("run targets persisted",
+      run_row is not None and run_row["coverage_target"] == 85.0
+      and run_row["max_iterations"] == 3)
+check("schema version stamped", SCHEMA_VERSION >= 1)
+
+p4_db.finish_run(P4_RUN, status="complete", iterations_used=2)
+run_row = p4_db.get_run(P4_RUN)
+check("finish_run closes the run",
+      run_row["status"] == "complete" and run_row["iterations_used"] == 2)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check 14: logging middleware writes tool_calls and fans out
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("14 - logging middleware: tool_calls + typed fan-out")
+
+cov_result = ToolResult(
+    tool="get_coverage", ok=True, score=0.4, proceed=True,
+    verdict="Coverage: 40.0%",
+    details={"percent": 40.0, "covered_lines": [1, 2, 3, 4],
+             "uncovered_ranges": [{"start": 10, "end": 12}], "uncovered_count": 3},
+    artifacts=["coverage.xml"], duration_ms=12, run_id=P4_RUN,
+)
+log_tool_call(cov_result, {"report_path": "coverage.xml",
+                           "source_file": "src/calculator.py"})
+
+logged = p4_db.tool_calls_for_run(P4_RUN)
+check("tool_call row written", len(logged) == 1, f"got {len(logged)}")
+check("details round-trip as a dict",
+      isinstance(logged[0]["details"], dict)
+      and logged[0]["details"]["percent"] == 40.0)
+check("artifacts round-trip as a list",
+      logged[0]["artifacts"] == ["coverage.xml"])
+
+points = p4_db.coverage_for_run(P4_RUN)
+check("get_coverage fanned out to coverage_history", len(points) == 1)
+check("coverage percent promoted to a real column",
+      points and points[0]["percent"] == 40.0)
+
+validate_result = ToolResult(
+    tool="validate_and_keep", ok=True, score=1.0, proceed=True,
+    verdict="kept", details={"kept": True, "reason": "coverage 40.0 -> 55.0",
+                             "coverage_before": 40.0, "coverage_after": 55.0,
+                             "rollback_performed": False},
+    artifacts=[], duration_ms=900, run_id=P4_RUN,
+)
+log_tool_call(validate_result, {
+    "test_file": "tests/test_calculator.py",
+    "candidate": {"test_code": "def test_divide_by_zero():\n    pass"},
+})
+test_rows = p4_db.tests_for_run(P4_RUN)
+check("validate_and_keep fanned out to tests", len(test_rows) == 1)
+check("test name recovered from the candidate code",
+      test_rows and test_rows[0]["test_name"] == "test_divide_by_zero",
+      f"got {test_rows[0]['test_name'] if test_rows else None!r}")
+check("keep decision + reason stored",
+      test_rows and test_rows[0]["kept"] == 1
+      and "coverage" in test_rows[0]["reason"])
+
+flaky_result = ToolResult(
+    tool="run_flaky_check", ok=True, score=0.5, proceed=False,
+    verdict="1 flaky test",
+    details={"runs": 5, "flaky": [{"test_id": "test_wobbly",
+                                   "outcomes": ["passed", "failed"]}],
+             "consistently_failing": []},
+    artifacts=[], duration_ms=2000, run_id=P4_RUN,
+)
+log_tool_call(flaky_result, {"test_file": "tests/test_calculator.py"})
+test_rows = p4_db.tests_for_run(P4_RUN)
+flaky_rows = [r for r in test_rows if r["stage"] == "flaky"]
+check("flaky test recorded as a discard",
+      len(flaky_rows) == 1 and flaky_rows[0]["kept"] == 0)
+
+mutation_result = ToolResult(
+    tool="mutation_test", ok=True, score=0.6, proceed=True,
+    verdict="mutation score 0.6",
+    details={"mutation_score": 0.6, "killed": 6, "survived_count": 4,
+             "not_covered": 1, "total": 10, "inconclusive": 0,
+             "survived": [{"id": "m1", "line": 12, "original": "a + b",
+                           "mutated": "a - b", "status": "survived"}],
+             "engine_available": True},
+    artifacts=[], duration_ms=30000, run_id=P4_RUN,
+)
+log_tool_call(mutation_result, {"target_module": "src/calculator.py"})
+mut_rows = p4_db.mutation_for_run(P4_RUN)
+check("mutation_test fanned out to mutation_results", len(mut_rows) == 1)
+check("survivors round-trip with their detail",
+      mut_rows and mut_rows[0]["survivors"]
+      and mut_rows[0]["survivors"][0]["mutated"] == "a - b")
+
+crashed = ToolResult(
+    tool="run_fuzz", ok=False, score=0.0, proceed=True,
+    verdict="Atheris not installed", details={"error": "no engine"},
+    artifacts=[], duration_ms=5, run_id=P4_RUN,
+)
+returned = log_tool_call(crashed, {"harness_path": "h.py"})
+check("middleware returns the result unchanged",
+      returned is crashed and returned.ok is False and returned.proceed is True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check 15: replay cache
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("15 - replay cache: keys, round-trip, and the REPLAY switch")
+
+args_a = {"report_path": "coverage.xml", "source_file": "src/calculator.py",
+          "run_id": "run-aaa"}
+args_b = dict(args_a, run_id="run-bbb")
+check("cache key ignores run_id",
+      p4_replay.cache_key("get_coverage", args_a)
+      == p4_replay.cache_key("get_coverage", args_b))
+
+abs_args = {"cwd": str(SAMPLE_ROOT)}
+rel_args = {"cwd": "sample_repo"}
+check("cache key rewrites repo-absolute paths to relative (portable snapshot)",
+      p4_replay.cache_key("run_tests", abs_args)
+      == p4_replay.cache_key("run_tests", rel_args),
+      f"{p4_replay.normalise_args(abs_args)} vs {p4_replay.normalise_args(rel_args)}")
+
+check("differing args produce differing keys",
+      p4_replay.cache_key("get_coverage", args_a)
+      != p4_replay.cache_key("get_coverage", {"report_path": "other.xml"}))
+
+live_calls = {"n": 0}
+
+
+def _fake_tool() -> ToolResult:
+    live_calls["n"] += 1
+    return ToolResult(
+        tool="run_tests", ok=True, score=1.0, proceed=True,
+        verdict="12 passed, 0 failed", details={"passed": 12, "failed": 0},
+        artifacts=[], duration_ms=4210, run_id=args_a["run_id"],
+    )
+
+
+os.environ["BOB_THE_TESTER_REPLAY"] = "0"
+result, replayed = p4_replay.replay_or_run("run_tests", args_a, _fake_tool)
+check("live mode executes the tool", live_calls["n"] == 1 and replayed is False)
+check("live result recorded to the snapshot",
+      p4_replay.load("run_tests", args_a) is not None)
+
+os.environ["BOB_THE_TESTER_REPLAY"] = "1"
+check("replay_enabled() reads the env switch", p4_replay.replay_enabled() is True)
+result, replayed = p4_replay.replay_or_run("run_tests", args_b, _fake_tool)
+check("replay mode does NOT execute the tool", live_calls["n"] == 1,
+      f"tool ran {live_calls['n']} times")
+check("replay mode reports replayed=True", replayed is True)
+check("replayed result is identical", result.verdict == "12 passed, 0 failed"
+      and result.details["passed"] == 12)
+check("replayed result is re-stamped with the CURRENT run_id",
+      result.run_id == "run-bbb", f"got {result.run_id}")
+
+result, replayed = p4_replay.replay_or_run(
+    "run_tests", {"report_path": "never-seen.xml"}, _fake_tool)
+check("a cache MISS in replay mode falls through to live execution",
+      live_calls["n"] == 2 and replayed is False)
+
+os.environ["BOB_THE_TESTER_REPLAY"] = "0"
+snap = p4_replay.snapshot_summary()
+check("snapshot summary counts entries", snap["entries"] >= 1, str(snap))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check 16: explain_gaps against a real coverage report
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("16 - explain_gaps on sample_repo/src/calculator.py")
+
+cov_xml_p4, _ = _run_coverage_for_smoke(SAMPLE_ROOT)
+result = explain_gaps(source_file=str(SAMPLE_SRC), report_path=cov_xml_p4,
+                      run_id=P4_RUN)
+
+check("ok=True", result.ok, result.verdict)
+check("proceed=True (reporting never gates)", result.proceed)
+gaps_found = result.details.get("gaps", [])
+check("uncovered regions found", len(gaps_found) > 0,
+      "baseline suite only covers add/subtract, so gaps must exist")
+if gaps_found:
+    first_gap = gaps_found[0]
+    check("gap resolves its enclosing function", bool(first_gap.get("function")))
+    check("gap carries a source snippet", bool(first_gap.get("snippet")))
+    check("gap carries objective signals, not a verdict",
+          isinstance(first_gap.get("signals"), dict)
+          and "in_main_guard" in first_gap["signals"])
+    check("gap line range is inside the file",
+          1 <= first_gap["start"] <= len(SAMPLE_SRC.read_text(
+              encoding="utf-8").splitlines()))
+print(f"     {result.verdict}")
+
+# Report discovery via the tool_calls log: no report_path passed at all.
+log_tool_call(
+    ToolResult(tool="get_coverage", ok=True, score=0.4, proceed=True,
+               verdict="logged for discovery",
+               details={"percent": 40.0, "covered_lines": [],
+                        "uncovered_count": 0},
+               artifacts=[cov_xml_p4], duration_ms=1, run_id=P4_RUN),
+    {"report_path": cov_xml_p4},
+)
+discovered = explain_gaps(source_file=str(SAMPLE_SRC), run_id=P4_RUN)
+check("report discovered from the tool_calls log when not passed",
+      discovered.ok and discovered.details.get("report_found_via", "").startswith(
+          "tool_calls"),
+      discovered.details.get("report_found_via", discovered.verdict))
+
+missing = explain_gaps(source_file="does/not/exist.py", run_id=P4_RUN)
+check("missing source degrades to ok=False but proceed=True",
+      missing.ok is False and missing.proceed is True, missing.verdict)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check 17: store_explanation + save_test_record (incl. the defect path)
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("17 - store_explanation + save_test_record (bug-vs-wrong-test)")
+
+result = store_explanation(
+    text="The `__main__` guard is never executed under pytest - intentional skip.",
+    source_file=str(SAMPLE_SRC), gaps=gaps_found[:1], run_id=P4_RUN,
+)
+check("ok=True", result.ok, result.verdict)
+stored_gaps = p4_db.gaps_for_run(P4_RUN)
+check("explanation persisted", len(stored_gaps) == 1)
+check("narrated gaps stored beside the prose",
+      stored_gaps and isinstance(stored_gaps[0]["gaps"], list))
+
+empty = store_explanation(text="   ", run_id=P4_RUN)
+check("empty explanation is rejected without gating",
+      empty.ok is False and empty.proceed is True, empty.verdict)
+
+result = save_test_record(
+    test_name="test_regression_rounding_negative_half",
+    test_file="tests/test_rounding.py", kept=True,
+    reason="Hypothesis found round(-0.5) returns 0, docstring promises -1",
+    stage="regression", bug_found=True,
+    source_file="sample_repo/src/rounding.py",
+    evidence="shrunk_input=-0.5", run_id=P4_RUN,
+)
+check("ok=True", result.ok, result.verdict)
+check("defect reported as bug_recorded", result.details.get("bug_recorded") is True)
+
+bug_rows = p4_db.bugs_for_run(P4_RUN)
+check("bugs_found row written", len(bug_rows) == 1)
+check("evidence stored for the defect",
+      bug_rows and "-0.5" in bug_rows[0]["evidence"])
+
+kept_rows = [r for r in p4_db.tests_for_run(P4_RUN) if r["bug_found"] == 1]
+check("a defect-finding test is KEPT, not discarded",
+      len(kept_rows) == 1 and kept_rows[0]["kept"] == 1)
+
+wrong = save_test_record(
+    test_name="test_asserts_wrong_thing", kept=False,
+    reason="asserted 3 == 4; the source docstring specifies 3",
+    stage="regression", bug_found=False, run_id=P4_RUN,
+)
+check("wrong-test path records a discard and no bug",
+      wrong.ok and wrong.details.get("bug_recorded") is False
+      and len(p4_db.bugs_for_run(P4_RUN)) == 1)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check 18: start_run / finish_run — the run lifecycle Bob drives
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("18 - start_run / finish_run: a run that closes itself")
+
+LIFE_RUN = "smoke-life-0001"
+
+opened = start_run_tool(run_id=LIFE_RUN, source_file="sample_repo/src/calculator.py",
+                        coverage_target=0.85, mutation_target=0.80, max_iterations=3)
+life_row = p4_db.get_run(LIFE_RUN)
+check("start_run opens the run", opened.ok and opened.proceed
+      and life_row is not None and life_row["status"] == "running")
+check("start_run returns the run_id to thread through the pipeline",
+      opened.details.get("run_id") == LIFE_RUN and opened.run_id == LIFE_RUN)
+
+# Fraction in, percent out for coverage; fraction stays a fraction for
+# mutation — the units the coverage and mutation tools actually report.
+check("targets normalise to the units the dashboard reads",
+      life_row["coverage_target"] == 85.0 and life_row["mutation_target"] == 0.8,
+      f"got {life_row['coverage_target']} / {life_row['mutation_target']}")
+
+pct_form = start_run_tool(run_id="smoke-life-pct", coverage_target=85, mutation_target=80)
+pct_row = p4_db.get_run("smoke-life-pct")
+check("percent-form targets normalise identically",
+      pct_form.ok and pct_row["coverage_target"] == 85.0
+      and pct_row["mutation_target"] == 0.8)
+
+closed = finish_run_tool(LIFE_RUN, status="complete", iterations_used=2,
+                         notes="targets met on iteration 2")
+life_row = p4_db.get_run(LIFE_RUN)
+check("finish_run closes the run",
+      closed.ok and life_row["status"] == "complete"
+      and life_row["finished_at"] is not None and life_row["iterations_used"] == 2)
+check("finish_run reports the run duration", closed.details.get("duration_ms") is not None)
+check("finish_run keeps proceed true even so", closed.proceed)
+
+orphan = finish_run_tool("smoke-life-orphan", status="aborted")
+check("a run nobody opened is backfilled and closed, not refused",
+      orphan.ok and orphan.details.get("run_existed") is False
+      and p4_db.get_run("smoke-life-orphan")["status"] == "aborted")
+
+no_id = finish_run_tool("")
+check("finish_run without a run_id fails loudly but never gates",
+      no_id.ok is False and no_id.proceed is True)
+
+# The lifecycle tools must never be served from the replay snapshot: a
+# cached "run closed" would leave the run open in the database forever.
+os.environ["BOB_THE_TESTER_REPLAY"] = "1"
+try:
+    replay_res, was_replayed = p4_replay.replay_or_run(
+        "finish_run", {"run_id": "smoke-life-replay"},
+        lambda: finish_run_tool("smoke-life-replay", status="complete"),
+    )
+    check("finish_run runs for real even in replay mode",
+          was_replayed is False
+          and p4_db.get_run("smoke-life-replay")["status"] == "complete")
+    check("lifecycle calls are not written into the replay snapshot",
+          not any(f.name.startswith(("finish_run__", "start_run__"))
+                  for f in p4_replay.cache_dir().glob("*.json")))
+finally:
+    os.environ["BOB_THE_TESTER_REPLAY"] = "0"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Check 19: usage — Bobcoin and tokens read out of Bob's ledger
+# ─────────────────────────────────────────────────────────────────────────────
+
+section("19 - usage: Bobcoin and tokens from Bob's ledger")
+
+from server.data import usage as p4_usage                 # noqa: E402
+from server.data.models import UsageRow                   # noqa: E402
+
+# A stand-in for ~/.bob/db/bob.db, so the check never depends on the machine
+# having run Bob — and never reads the developer's real ledger.
+FAKE_BOB_DB = P4_TMP / "bob.db"
+_bob = sqlite3.connect(str(FAKE_BOB_DB))
+_bob.executescript("""
+    CREATE TABLE tasks (id TEXT PRIMARY KEY, project_id TEXT, title TEXT,
+                        costs TEXT, created_at INTEGER, updated_at INTEGER);
+""")
+_workspace = "/tmp/some/workspace"
+
+
+def _write_task(cost, tokens_in, tokens_out, updated):
+    _bob.execute("INSERT OR REPLACE INTO tasks VALUES (?,?,?,?,?,?)", (
+        "task-1", f"file:{_workspace}", "smoke",
+        json.dumps({"input": tokens_in, "output": tokens_out, "cacheRead": 10,
+                    "cacheWrite": 5, "cost": cost, "contextTokens": 4096}),
+        1000, updated,
+    ))
+    _bob.commit()
+
+
+os.environ["BOB_DB"] = str(FAKE_BOB_DB)
+
+_write_task(1.5, 1000, 100, 2000)
+snap_a = p4_usage.snapshot(_workspace)
+check("snapshot reads the task ledger",
+      snap_a is not None and snap_a["cost"] == 1.5
+      and snap_a["total_tokens"] == 1100, str(snap_a))
+
+_write_task(4.0, 3000, 250, 3000)
+snap_b = p4_usage.snapshot(_workspace)
+delta = p4_usage.subtract(snap_a, snap_b)
+check("subtract reports THIS run's spend, not the task's total",
+      delta["cost"] == 2.5 and delta["input_tokens"] == 2000
+      and delta["output_tokens"] == 150 and delta["attribution"] == "task-delta",
+      str(delta))
+
+no_baseline = p4_usage.subtract(None, snap_b)
+check("without a baseline the totals are labelled an upper bound",
+      no_baseline["cost"] == 4.0 and no_baseline["attribution"] == "task-totals")
+
+# A ledger that resets (a new task reusing the id) must not produce a
+# negative cost — the run simply spent nothing measurable.
+_write_task(0.5, 10, 1, 4000)
+clamped = p4_usage.subtract(snap_b, p4_usage.snapshot(_workspace))
+check("a ledger that moves backwards clamps at zero",
+      clamped["cost"] == 0.0 and clamped["input_tokens"] == 0, str(clamped))
+
+os.environ["BOB_DB"] = str(P4_TMP / "definitely-not-here.db")
+check("a missing ledger yields no snapshot, not an exception",
+      p4_usage.snapshot(_workspace) is None)
+
+# The lifecycle tools must persist whatever was read.
+os.environ["BOB_DB"] = str(FAKE_BOB_DB)
+USAGE_RUN = "smoke-usage-0001"
+p4_db.insert_usage(UsageRow(run_id=USAGE_RUN, cost=2.5, input_tokens=2000,
+                            output_tokens=150, total_tokens=2150,
+                            attribution="task-delta", task_id="task-1"))
+usage_rows = p4_db.usage_for_run(USAGE_RUN)
+check("usage rows round-trip through the database",
+      len(usage_rows) == 1 and usage_rows[0]["cost"] == 2.5
+      and usage_rows[0]["attribution"] == "task-delta")
+
+_bob.close()
+os.environ.pop("BOB_DB", None)
+
+# ── Clean up P4 fixtures ─────────────────────────────────────────────────────
+for _var in ("BOB_THE_TESTER_DB", "BOB_THE_TESTER_REPLAY_DIR", "BOB_THE_TESTER_REPLAY"):
+    os.environ.pop(_var, None)
+try:
+    Path(cov_xml_p4).unlink(missing_ok=True)
+except Exception:  # noqa: BLE001
+    pass
+shutil.rmtree(P4_TMP, ignore_errors=True)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary
 # ─────────────────────────────────────────────────────────────────────────────
 
 section("SUMMARY")
 if not failures:
-    print(f"\n  {PASS} All P1 + P2 smoke checks passed.")
+    print(f"\n  {PASS} All P1 + P2 + P4 smoke checks passed.")
     print(f"  Server is ready. Register in .bob/mcp.json and run Bob's skill.\n")
     sys.exit(0)
 else:

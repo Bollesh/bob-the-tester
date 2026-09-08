@@ -23,7 +23,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
+from pathlib import Path
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -43,15 +45,47 @@ from server.pipeline.mutation import mutation_test
 from server.pipeline.properties import run_property_tests
 from server.pipeline.smells import detect_smells
 
-# ── P4 data imports (added here when P4 branch merges) ──────────────────────
-# Pattern:
-#   from server.data.logging_mw import log_tool_call   # wrap result before return
-#   from server.data.replay import replay_or_run        # BOB_THE_TESTER_REPLAY gate
-#   from server.gaps import explain_gaps
+# ── P4 data imports ─────────────────────────────────────────────────────────
+from server.data.logging_mw import log_tool_call
+from server.data.replay import replay_enabled, replay_or_run
+from server.data.runs import finish_run, start_run
+from server.gaps import explain_gaps, save_test_record, store_explanation
 
 logging.basicConfig(level=logging.INFO, stream=sys.stderr,
                     format="%(asctime)s [bob-the-tester] %(levelname)s %(message)s")
 logger = logging.getLogger("bob-the-tester")
+
+# server/main.py → server → repo root
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _add_file_log() -> None:
+    """
+    Mirror the log to a file as well as stderr.
+
+    An IDE-launched STDIO server has nowhere useful to put stderr: it goes
+    to whatever pane the client happens to keep, and in practice it is
+    gone.  That is exactly the output you need when a tool call did not
+    make it into the database — every db.py writer swallows its exception
+    and warns here rather than failing the call.
+
+    Override the location with BOB_THE_TESTER_LOG.  Failing to open the
+    file is not fatal: the server must start even on a read-only checkout.
+    """
+    target = os.environ.get("BOB_THE_TESTER_LOG", "").strip()
+    path = Path(target) if target else REPO_ROOT / "logs" / "server.log"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(path, encoding="utf-8")
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(name)s] %(levelname)s %(message)s"))
+        logging.getLogger().addHandler(handler)
+        logger.info("Logging to %s", path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not open log file %s: %s", path, exc)
+
+
+_add_file_log()
 
 app = Server("bob-the-tester")
 
@@ -471,8 +505,242 @@ async def list_tools() -> list[Tool]:
         # ════════════════════════════════════════════════════════════════
         # P4 — DATA / EXPLAIN TOOLS
         # ════════════════════════════════════════════════════════════════
-        # Tool(name="explain_gaps", ...),
-        # Tool(name="store_explanation", ...),
+
+        Tool(
+            name="start_run",
+            description=(
+                "Open a run and record its targets.  Call this ONCE at stage 0, "
+                "before any other tool, and pass the run_id it returns to every "
+                "later call.\n\n"
+                "Without it a run row is backfilled with no targets and no start "
+                "time of its own, and the dashboard has nothing to compare the "
+                "final numbers against.\n\n"
+                "Targets may be given as fractions (0.85) or percents (85) - both "
+                "are normalised.\n\n"
+                "Decision fields in details:\n"
+                "  run_id   - USE THIS for every subsequent tool call\n"
+                "  stored   - false means the database write failed; the pipeline\n"
+                "             still runs, it just will not be on the dashboard\n\n"
+                "proceed is always true."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": (
+                            "Optional. Omit to have one generated, or pass your own "
+                            "to resume/re-enter an existing run."
+                        ),
+                    },
+                    "source_file": {
+                        "type": "string",
+                        "description": "The module this run is covering.",
+                    },
+                    "coverage_target": {
+                        "type": "number",
+                        "description": "Line-coverage target, e.g. 0.85 or 85.",
+                    },
+                    "mutation_target": {
+                        "type": "number",
+                        "description": "Mutation-score target, e.g. 0.80 or 80.",
+                    },
+                    "max_iterations": {
+                        "type": "integer",
+                        "description": "The hard iteration cap you are working to.",
+                    },
+                },
+                "required": [],
+            },
+        ),
+
+        Tool(
+            name="explain_gaps",
+            description=(
+                "Return structured data about every region of a source file that the "
+                "tests never executed, ready to narrate.\n\n"
+                "This tool reports FACTS ONLY.  Categorising each gap (dead code / "
+                "external dependency / complex trigger / intentional skip / iteration "
+                "limit) is your judgment call - use prompts/gap_explanation.md, then "
+                "persist the prose with store_explanation.\n\n"
+                "You do not need to pass report_path: the coverage report logged by "
+                "get_coverage earlier in this run is found automatically, as long as "
+                "you pass the same run_id.\n\n"
+                "Decision fields in details:\n"
+                "  gaps[]          - {start, end, function, signature, docstring,\n"
+                "                     snippet, line_count, signals{}}\n"
+                "  signals         - objective hints per region: in_main_guard,\n"
+                "                    raises_only, has_raise, in_except_handler,\n"
+                "                    is_logging_only, decorators\n"
+                "  percent         - line coverage for this file\n"
+                "  gap_count, total_uncovered\n\n"
+                "proceed is always true."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_file": {
+                        "type": "string",
+                        "description": "Path to the Python source file to analyse.",
+                    },
+                    "report_path": {
+                        "type": "string",
+                        "description": (
+                            "Optional path to coverage.xml.  Omit to reuse the report "
+                            "get_coverage logged for this run_id."
+                        ),
+                    },
+                    "run_id": {"type": "string"},
+                },
+                "required": ["source_file"],
+            },
+        ),
+
+        Tool(
+            name="store_explanation",
+            description=(
+                "Persist your plain-language explanation of the coverage gaps to the "
+                "database so it appears on the dashboard.\n\n"
+                "Call this once, after explain_gaps, with the prose you wrote about "
+                "the uncovered regions.  Pass the same run_id as the rest of the "
+                "pipeline or the explanation will not attach to this run.\n\n"
+                "proceed is always true."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The explanation (markdown accepted).",
+                    },
+                    "source_file": {
+                        "type": "string",
+                        "description": "File the explanation is about.",
+                    },
+                    "gaps": {
+                        "type": "array",
+                        "description": (
+                            "Optional: the gap structures from explain_gaps that this "
+                            "prose narrates, stored verbatim beside the text."
+                        ),
+                        "items": {"type": "object"},
+                    },
+                    "run_id": {"type": "string"},
+                },
+                "required": ["text"],
+            },
+        ),
+
+        Tool(
+            name="save_test_record",
+            description=(
+                "Record a test's fate - and, crucially, report a GENUINE DEFECT.\n\n"
+                "Bug-vs-wrong-test classification: when a validated test later FAILS "
+                "against the code, decide which case it is, using the source's "
+                "docstrings, type hints, and names as the specification:\n"
+                "  (a) the code is wrong -> call this with bug_found=true and "
+                "kept=true.  DO NOT discard the test.  It lands in the dashboard's "
+                "defects panel.\n"
+                "  (b) the test asserts wrong behaviour -> call this with kept=false "
+                "and bug_found=false, and give the reason.\n\n"
+                "Also use it to record keep/discard decisions made at stages with no "
+                "tool of their own (smell critique, mutant-killing regeneration).\n\n"
+                "proceed is always true."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "test_name": {
+                        "type": "string",
+                        "description": "Name of the test function.",
+                    },
+                    "test_file": {"type": "string", "description": "File it lives in."},
+                    "kept": {
+                        "type": "boolean",
+                        "description": "True if the test stays in the suite. Default true.",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": (
+                            "Why kept or discarded - shown verbatim on the dashboard. "
+                            "For a defect, describe the bug."
+                        ),
+                    },
+                    "stage": {
+                        "type": "string",
+                        "description": (
+                            "Stage that made the decision: regression, mutation, "
+                            "smell_critique, property, fuzz."
+                        ),
+                    },
+                    "bug_found": {
+                        "type": "boolean",
+                        "description": (
+                            "True ONLY for classification (a): the test exposed a real "
+                            "defect in the source. Writes the bugs_found row."
+                        ),
+                    },
+                    "source_file": {
+                        "type": "string",
+                        "description": "Module the defect is in (defects only).",
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "description": (
+                            "Failing input, shrunk counterexample, or traceback tail "
+                            "(defects only)."
+                        ),
+                    },
+                    "run_id": {"type": "string"},
+                },
+                "required": ["test_name"],
+            },
+        ),
+
+        Tool(
+            name="finish_run",
+            description=(
+                "Close the run: stamp the finish time, the final status, and how "
+                "many iterations were used.\n\n"
+                "Call this ONCE, LAST, on EVERY exit path - including the unhappy "
+                "ones.  A run you leave open keeps reporting itself as still in "
+                "progress on the dashboard long after the session ended, which is "
+                "worse than reporting a failure.\n\n"
+                "status: 'complete' when the pipeline reached stage 13, 'failed' "
+                "when a tool broke it, 'aborted' when you stopped early (iteration "
+                "cap, user interrupt).\n\n"
+                "Decision fields in details:\n"
+                "  closed        - false means the write failed; say so in the report\n"
+                "  duration_ms   - wall-clock length of the whole run\n"
+                "  run_existed   - false means start_run was never called\n\n"
+                "proceed is always true."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "run_id": {
+                        "type": "string",
+                        "description": "The run_id start_run returned. Required.",
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "complete | failed | aborted.",
+                    },
+                    "iterations_used": {
+                        "type": "integer",
+                        "description": "Outer coverage-loop iterations actually used.",
+                    },
+                    "notes": {
+                        "type": "string",
+                        "description": (
+                            "One line for the dashboard: why the run ended the way "
+                            "it did."
+                        ),
+                    },
+                },
+                "required": ["run_id"],
+            },
+        ),
     ]
 
 
@@ -480,95 +748,161 @@ async def list_tools() -> list[Tool]:
 # Tool call dispatcher
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
-    """Route MCP tool calls to their implementations."""
+def _dispatch(name: str, arguments: dict) -> ToolResult:
+    """
+    Route one MCP tool call to its implementation.
+
+    Pure routing: no logging, no caching, no business logic.  Lifted out of
+    call_tool() so P4's replay cache can hand it to replay_or_run() as the
+    "run it for real" callable.
+    """
     result: ToolResult
 
+    # ── P1 core tools ─────────────────────────────────────────────────
+    if name == "run_tests":
+        result = run_tests(
+            test_command=arguments["test_command"],
+            cwd=arguments["cwd"],
+            run_id=arguments.get("run_id"),
+        )
+
+    elif name == "get_coverage":
+        result = get_coverage(
+            report_path=arguments["report_path"],
+            source_file=arguments.get("source_file", ""),
+            run_start_ms=arguments.get("run_start_ms"),
+            run_id=arguments.get("run_id"),
+        )
+
+    elif name == "list_uncovered":
+        result = list_uncovered(
+            source_file=arguments["source_file"],
+            report_path=arguments.get("report_path", ""),
+            run_id=arguments.get("run_id"),
+        )
+
+    elif name == "validate_and_keep":
+        result = validate_and_keep(
+            test_file=arguments["test_file"],
+            candidate=arguments["candidate"],
+            cwd=arguments.get("cwd", ""),
+            source_file=arguments.get("source_file", ""),
+            run_id=arguments.get("run_id"),
+        )
+
+    # ── P2 pipeline tools ─────────────────────────────────────────────
+    elif name == "detect_smells":
+        result = detect_smells(
+            test_file=arguments["test_file"],
+            run_id=arguments.get("run_id"),
+        )
+
+    elif name == "run_flaky_check":
+        result = run_flaky_check(
+            test_file=arguments["test_file"],
+            n=arguments.get("n", 5),
+            cwd=arguments.get("cwd", ""),
+            run_id=arguments.get("run_id"),
+        )
+
+    elif name == "run_property_tests":
+        result = run_property_tests(
+            target=arguments["target"],
+            max_examples=arguments.get("max_examples", 100),
+            cwd=arguments.get("cwd", ""),
+            run_id=arguments.get("run_id"),
+        )
+
+    elif name == "run_fuzz":
+        result = run_fuzz(
+            harness_path=arguments["harness_path"],
+            seconds=arguments.get("seconds", 60),
+            cwd=arguments.get("cwd", ""),
+            run_id=arguments.get("run_id"),
+        )
+
+    elif name == "mutation_test":
+        result = mutation_test(
+            target_module=arguments["target_module"],
+            cwd=arguments.get("cwd", ""),
+            tests_dir=arguments.get("tests_dir", "tests"),
+            timeout_s=arguments.get("timeout_s", 900),
+            run_id=arguments.get("run_id"),
+        )
+
+    # ── P4 data tools ─────────────────────────────────────────────────
+    elif name == "start_run":
+        result = start_run(
+            run_id=arguments.get("run_id", ""),
+            source_file=arguments.get("source_file", ""),
+            coverage_target=arguments.get("coverage_target"),
+            mutation_target=arguments.get("mutation_target"),
+            max_iterations=arguments.get("max_iterations"),
+        )
+
+    elif name == "finish_run":
+        result = finish_run(
+            run_id=arguments.get("run_id", ""),
+            status=arguments.get("status", "complete"),
+            iterations_used=arguments.get("iterations_used"),
+            notes=arguments.get("notes", ""),
+        )
+
+    elif name == "explain_gaps":
+        result = explain_gaps(
+            source_file=arguments["source_file"],
+            report_path=arguments.get("report_path", ""),
+            run_id=arguments.get("run_id"),
+        )
+
+    elif name == "store_explanation":
+        result = store_explanation(
+            text=arguments["text"],
+            source_file=arguments.get("source_file", ""),
+            gaps=arguments.get("gaps"),
+            run_id=arguments.get("run_id"),
+        )
+
+    elif name == "save_test_record":
+        result = save_test_record(
+            test_name=arguments["test_name"],
+            test_file=arguments.get("test_file", ""),
+            kept=arguments.get("kept", True),
+            reason=arguments.get("reason", ""),
+            stage=arguments.get("stage", "regression"),
+            bug_found=arguments.get("bug_found", False),
+            source_file=arguments.get("source_file", ""),
+            evidence=arguments.get("evidence", ""),
+            run_id=arguments.get("run_id"),
+        )
+
+    else:
+        raise ValueError(f"Unknown tool: '{name}'.  Check list_tools() for valid names.")
+
+    return result
+
+
+@app.call_tool()
+async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+    """
+    Dispatch a tool call, with P4's replay cache and logging wrapped around it.
+
+    Order matters:
+      1. replay_or_run  — in BOB_THE_TESTER_REPLAY mode a cached result is
+         returned without executing anything; otherwise the tool runs and a
+         successful result is written through to the snapshot.
+      2. log_tool_call  — every call is persisted to tool_calls, replayed or
+         not, and structured payloads fan out to the typed tables.
+
+    Neither step may alter the result.  `proceed` is computed by the tool
+    and is the server's word (AGENTS.md §7 invariant 2); persistence
+    observes the pipeline, it never participates in it.
+    """
+    result: ToolResult
+    replayed = False
+
     try:
-        # ── P1 core tools ─────────────────────────────────────────────────
-        if name == "run_tests":
-            result = run_tests(
-                test_command=arguments["test_command"],
-                cwd=arguments["cwd"],
-                run_id=arguments.get("run_id"),
-            )
-
-        elif name == "get_coverage":
-            result = get_coverage(
-                report_path=arguments["report_path"],
-                source_file=arguments.get("source_file", ""),
-                run_start_ms=arguments.get("run_start_ms"),
-                run_id=arguments.get("run_id"),
-            )
-
-        elif name == "list_uncovered":
-            result = list_uncovered(
-                source_file=arguments["source_file"],
-                report_path=arguments.get("report_path", ""),
-                run_id=arguments.get("run_id"),
-            )
-
-        elif name == "validate_and_keep":
-            result = validate_and_keep(
-                test_file=arguments["test_file"],
-                candidate=arguments["candidate"],
-                cwd=arguments.get("cwd", ""),
-                source_file=arguments.get("source_file", ""),
-                run_id=arguments.get("run_id"),
-            )
-
-        # ── P2 pipeline tools ─────────────────────────────────────────────
-        elif name == "detect_smells":
-            result = detect_smells(
-                test_file=arguments["test_file"],
-                run_id=arguments.get("run_id"),
-            )
-
-        elif name == "run_flaky_check":
-            result = run_flaky_check(
-                test_file=arguments["test_file"],
-                n=arguments.get("n", 5),
-                cwd=arguments.get("cwd", ""),
-                run_id=arguments.get("run_id"),
-            )
-
-        elif name == "run_property_tests":
-            result = run_property_tests(
-                target=arguments["target"],
-                max_examples=arguments.get("max_examples", 100),
-                cwd=arguments.get("cwd", ""),
-                run_id=arguments.get("run_id"),
-            )
-
-        elif name == "run_fuzz":
-            result = run_fuzz(
-                harness_path=arguments["harness_path"],
-                seconds=arguments.get("seconds", 60),
-                cwd=arguments.get("cwd", ""),
-                run_id=arguments.get("run_id"),
-            )
-
-        elif name == "mutation_test":
-            result = mutation_test(
-                target_module=arguments["target_module"],
-                cwd=arguments.get("cwd", ""),
-                tests_dir=arguments.get("tests_dir", "tests"),
-                timeout_s=arguments.get("timeout_s", 900),
-                run_id=arguments.get("run_id"),
-            )
-
-        # ── P4 data tools ─────────────────────────────────────────────────
-        # Pattern:
-        #   elif name == "explain_gaps":
-        #       result = explain_gaps(
-        #           source_file=arguments["source_file"],
-        #           run_id=arguments.get("run_id"),
-        #       )
-        # elif name == "explain_gaps":    ...
-
-        else:
-            raise ValueError(f"Unknown tool: '{name}'.  Check list_tools() for valid names.")
+        result, replayed = replay_or_run(name, arguments, lambda: _dispatch(name, arguments))
 
     except Exception as exc:  # noqa: BLE001
         logger.exception("Dispatch error for tool '%s'", name)
@@ -584,14 +918,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             run_id=arguments.get("run_id", ""),
         )
 
-    # ── P4 logging middleware ─────────────────────────────────────────────────
-    # After result is computed (above), P4 adds ONE line here:
-    #   log_tool_call(result, arguments)
-    # That function (server/data/logging_mw.py) writes to the tool_calls table.
-    # The run_id on every ToolResult is the correlation key for the dashboard.
-    # P4's logging middleware will wrap this later (data/logging_mw.py)
-    logger.info("tool=%s ok=%s proceed=%s verdict=%r",
-                result.tool, result.ok, result.proceed, result.verdict)
+    # ── P4 logging middleware ────────────────────────────────────────────
+    # Writes tool_calls + fans out to coverage_history / tests /
+    # mutation_results.  Returns `result` unchanged and never raises: a
+    # database problem must not break a tool call mid-demo.
+    log_tool_call(result, arguments, replayed=replayed)
+
+    logger.info("tool=%s ok=%s proceed=%s replayed=%s verdict=%r",
+                result.tool, result.ok, result.proceed, replayed, result.verdict)
 
     return [TextContent(type="text", text=result.model_dump_json(indent=2))]
 
@@ -601,6 +935,9 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _amain() -> None:
+    if replay_enabled():
+        logger.info("REPLAY MODE ON — tool results served from the demo_replay/ "
+                    "snapshot; no subprocesses will be executed.")
     async with stdio_server() as (read_stream, write_stream):
         await app.run(
             read_stream,
