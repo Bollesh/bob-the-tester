@@ -1,13 +1,13 @@
 {
   "mcpServers": {
     "bob-the-tester": {
-      "command": "python3",
+      "command": "/run/media/bolleshjonathan/New Volume/BOB/bob-the-tester/.venv/bin/python",
       "args": [
         "-m",
         "server.main"
       ],
       "env": {
-        "PYTHONPATH": ".",
+        "PYTHONPATH": "/run/media/bolleshjonathan/New Volume/BOB/bob-the-tester",
         "BOB_THE_TESTER_REPLAY": "0"
       }
     },
