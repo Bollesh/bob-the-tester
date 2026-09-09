@@ -12,3 +12,10 @@
 | BUG-004 | `src/api.py` | TBD — 500 on malformed payload (if fuzzing survives the cut) | Stage 8 (run_fuzz) |
 
 See `docs/benchmarks.md` for before/after coverage and mutation scores.
+
+---
+
+**Note.** A worked implementation of this map now exists as a separate demo
+target in the sibling checkout `../sample_repo` — a checkout/pricing engine
+with all four bugs actually seeded and documented. This directory stays as
+P1's smoke fixture (`calculator.py`), which `scripts/smoke.py` targets by path.
