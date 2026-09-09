@@ -89,7 +89,8 @@ server/           MCP server package (STDIO transport, official `mcp` SDK)
   gaps.py         explain_gaps, store_explanation, save_test_record
 dashboard/        Static HTML report — build.py, serve.py, render.py, static/
 sample_repo/      Demo target — `calculator.py`, the fixture smoke.py runs against
-scripts/          smoke.py (exercises every tool without Bob), reset_demo.py
+scripts/          smoke.py (exercises every tool without Bob), reset_demo.py,
+                  mcp_server.sh (launcher — activates or bootstraps the venv)
 demo_replay/      Recorded tool results for offline replay (generated, gitignored)
 bob_sessions/     Exported Bob task reports — append-only evidence
 logs/             MCP server log (generated, gitignored)
@@ -112,7 +113,7 @@ python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 ```
 
-Install into a virtualenv and use *that* interpreter everywhere — the MCP registration points at it by absolute path. A system Python without `mcp`, `hypothesis` or `mutmut` produces a server that either fails to start or silently degrades half the pipeline.
+Install into a virtualenv and use *that* interpreter everywhere. A system Python without `mcp`, `hypothesis` or `mutmut` produces a server that either fails to start or silently degrades half the pipeline. Steps 1 and 2 are also what `scripts/mcp_server.sh` does for you on first launch, so on a fresh clone you can skip straight to *Register the server* and let the launcher build the venv.
 
 ### 2. Install the package
 
@@ -165,10 +166,8 @@ A STDIO server is not a service you start and connect to: the host launches it a
 {
   "mcpServers": {
     "bob-the-tester": {
-      "command": "/absolute/path/to/bob-the-tester/.venv/bin/python",
-      "args": ["-m", "server.main"],
+      "command": "${workspaceFolder}/scripts/mcp_server.sh",
       "env": {
-        "PYTHONPATH": "/absolute/path/to/bob-the-tester",
         "BOB_THE_TESTER_REPLAY": "0"
       }
     }
@@ -176,11 +175,14 @@ A STDIO server is not a service you start and connect to: the host launches it a
 }
 ```
 
-Three details in that file are load-bearing:
+That file holds no machine-specific paths, so it works on any clone as committed. `command` points at `scripts/mcp_server.sh`, which activates the venv and launches the server. Four details make it work:
 
-- **Launch as `python -m server.main`, not `python server/main.py`.** Running the file as a script puts `server/` on `sys.path` instead of the repo root, which breaks `from server.schema import ToolResult`.
-- **`command` and `PYTHONPATH` must be absolute.** The IDE does not spawn the server in the workspace root, so a relative `PYTHONPATH` resolves somewhere else and the server dies with `No module named 'server'` — three failed reconnects, no tools advertised, and an agent that improvises around the missing server without telling you. Anyone cloning this repo must repoint both at their own checkout and virtualenv.
-- **Nothing but the protocol may write to stdout.** stdout *is* the wire; a stray `print()` in server code corrupts the session. This is why the server logs to `logs/server.log` instead.
+- **`${workspaceFolder}` is what keeps the file portable, and the launcher covers the rest.** Bob expands the variable to the checkout root; the script then locates the repo from its own `BASH_SOURCE`, so it does not care where it was spawned. Both halves are needed: Bob starts servers with `cwd` set to your home directory, not the workspace, so a relative `command` never resolves — and a client launched from an IDE or desktop icon carries no activated venv, so a bare console-script name on `PATH` never resolves either. Variable expansion is client-specific and is not part of the MCP spec; on a host that does not expand it, use the checkout's own path.
+- **It bootstraps a missing venv.** If `.venv/bin/bob-the-tester-server` is absent, the script creates the venv with the newest Python ≥3.11 it can find and runs `pip install -e ".[dev]"` before starting. It keys on the entry point rather than the directory, so a venv that exists but was never installed into is repaired too. First launch then takes about a minute; the client may time the handshake out, so run `./scripts/mcp_server.sh` once by hand on a fresh clone and let it finish. Override the location with `BOB_THE_TESTER_VENV`.
+- **Nothing but the protocol may write to stdout.** stdout *is* the wire; a stray `print()` in server code corrupts the session — and pip is far chattier than any `print()`. Every diagnostic in the launcher goes to stderr and `logs/bootstrap.log`, and pip's output is redirected there wholesale. The server itself logs to `logs/server.log` for the same reason.
+- **No `PYTHONPATH` is needed.** The editable install puts an `__editable__.bob_the_tester-*.pth` finder in site-packages, so `import server` resolves from any working directory. Set it only if you are running from a checkout you never `pip install -e`'d — and note that launching as `python server/main.py` would put `server/` on `sys.path` instead of the repo root, breaking `from server.schema import ToolResult`. Use `-m server.main` if you go that route.
+
+The launcher is bash. On Windows, point `command` at `.venv\Scripts\bob-the-tester-server` and create the venv yourself.
 
 Other hosts take the same command in their own file — VS Code (1.99+, Copilot Agent mode) uses `.vscode/mcp.json` with `"type": "stdio"` on each entry; Claude Desktop uses `claude_desktop_config.json`. The shape is otherwise identical.
 
@@ -201,9 +203,11 @@ Running `bob-the-tester-server` by hand is a valid smoke test too — it blocks 
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| Host shows no tools, log says `No module named 'server'` | Relative or wrong `PYTHONPATH` in the registration | Absolute paths for both `command` and `PYTHONPATH` |
+| Host shows no tools, nothing reaches `logs/server.log` | The launcher never ran — wrong path in `command`, or it isn't executable | Check `command` resolves; `chmod +x scripts/mcp_server.sh` |
+| Host shows no tools, `logs/bootstrap.log` ends mid-install | First-launch bootstrap outran the client's handshake timeout | Run `./scripts/mcp_server.sh` by hand once, let it finish, restart the client |
+| Server exits with `No module named 'server'` | The venv exists but the package was never installed into it | `pip install -e ".[dev]"`, or delete `.venv` and let the launcher rebuild it |
 | Server exits at import with an `mcp` attribute error | mcp 2.x installed | `pip install "mcp>=1.0,<2"` |
-| `engine_available: false` on a pipeline stage | That engine isn't in the active interpreter | `pip install -e ".[dev]"` in the venv the registration points at |
+| `engine_available: false` on a pipeline stage | That engine isn't in the active interpreter | `pip install -e ".[dev]"` in the venv on `PATH` |
 | `mutation_test` returns a 0% score with `not checked` mutants | `cwd` and the target paths belong to different roots | Pass every path relative to one `cwd` — see *Paths and `cwd`* above |
 | Server starts but the host reports a protocol error | Something wrote to stdout | Log to `logs/server.log`, never `print()` |
 
@@ -296,7 +300,6 @@ Latest full run through the IDE (2026-09-08, `calculator.py`, one iteration, 12m
 - **The path convention is not pinned in the skill**, so Bob chose repo-root-relative paths with `cwd` at the repo root. `mutation_test` then generated 72 mutants and ran the suite against none of them (`not checked`), producing a 0% score that measures nothing. The project's headline metric is absent from the latest run for this reason alone.
 - **Nothing re-measures coverage at the end of a run.** `get_coverage` runs once, at baseline, so `explain_gaps` narrates the *baseline* gaps and the dashboard's coverage trend has a single point — a run that finished at 97.67% reports 25.58%.
 - **The fuzz harness ignores `-max_total_time`.** Both `run_fuzz` calls were killed (90s, 45s) with 0 execs, yet scored `1.0` — a stage that did no fuzzing presents as a clean pass.
-- **`.bob/mcp.json` holds absolute paths** for the interpreter and `PYTHONPATH`. Correct on this machine, wrong on every other one.
 - **Schema v2 needs its `contract-change` PR.** The `usage` table and the version bump are in `server/data/models.py`, which is frozen.
 - **`smoke.py` fails one check** — `seeded crash was found`. Atheris is installed and runs; the seeded crash is not reaching it.
 - **`sample_repo/` is still the placeholder fixture.** `calculator.py` stands in for the seeded-bug modules in the plan, so the bug↔stage mapping in its `BUGS.md` is not yet exercised. A worked demo target *does* now exist as a sibling checkout, `../sample_repo` — a checkout/pricing engine (money, parser, pricing, inventory, engine, api) with one bug seeded per pipeline stage and each mapped to its stage in `BUGS.md`. Retargeting `scripts/smoke.py` at it is the open work: the script hard-codes `sample_repo/src/calculator.py` in about 33 places, including inline candidate tests that `from calculator import divide` and gap assertions naming `factorial` / `is_prime` / `gcd`.
